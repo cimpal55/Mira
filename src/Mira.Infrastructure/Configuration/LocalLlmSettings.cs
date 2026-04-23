@@ -1,2 +1,9 @@
-// Strongly-typed options for local LLM backend: BaseUrl and Model name. Bound to "LocalLlm" section in appsettings.json.
 namespace Mira.Infrastructure.Configuration;
+
+public sealed class LocalLlmSettings
+{
+    public const string SectionName = "LocalLlm";
+
+    public required string BaseUrl { get; init; }
+    public required string Model { get; init; }
+}

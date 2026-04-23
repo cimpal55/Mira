@@ -1,2 +1,9 @@
-// Strongly-typed options for Telegram configuration: BotToken and AllowedChatId. Bound to "Telegram" section in appsettings.json.
 namespace Mira.Infrastructure.Configuration;
+
+public sealed class TelegramSettings
+{
+    public const string SectionName = "Telegram";
+
+    public required string BotToken { get; init; }
+    public required long AllowedChatId { get; init; }
+}
