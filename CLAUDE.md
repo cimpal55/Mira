@@ -29,7 +29,7 @@ User struggles with:
 
 - **Runtime:** .NET 9, C#
 - **Telegram:** Telegram.Bot library
-- **Local LLM:** Ollama (primary, free, private) — Hermes 3 8B model
+- **Local LLM:** Any OpenAI-compatible backend (LM Studio, llama.cpp, vLLM, etc.) — Hermes 3 8B model
 - **Cloud LLM:** Anthropic Claude API (fallback for complex reasoning)
 - **Storage:** Start with Notion API, SQLite as fallback
 - **Health data:** MyFitnessPal export / manual logging via bot
@@ -69,7 +69,7 @@ User struggles with:
 
 Two providers, different use cases:
 
-**Ollama (local, default):**
+**Local LLM (default, via OpenAI-compatible API — LM Studio, llama.cpp, vLLM, etc.):**
 - Daily logging (health, thoughts)
 - Simple message routing and classification
 - Structuring and saving incoming data
