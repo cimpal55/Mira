@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Mira.App/Mira.App.csproj" />
+    <Project Path="src/Mira.Core/Mira.Core.csproj" />
+    <Project Path="src/Mira.Infrastructure/Mira.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Mira.Core.Tests/Mira.Core.Tests.csproj" />
+  </Folder>
+</Solution>
