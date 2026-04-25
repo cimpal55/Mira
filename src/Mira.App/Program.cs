@@ -1,1 +1,7 @@
-// Entry point: build Host, register services via DependencyInjection.AddInfrastructure(), add ProcessMessageUseCase, run.
+using Mira.Infrastructure;
+
+var builder = Host.CreateApplicationBuilder(args);
+builder.Services.AddInfrastructure(builder.Configuration);
+
+var host = builder.Build();
+host.Run();
