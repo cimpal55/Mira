@@ -38,14 +38,13 @@ internal sealed class LocalLlmProvider : ILlmProvider
         CancellationToken ct)
     {
         var request = new ChatCompletionRequest
-        {
-            Model = _settings.Model,
-            Messages =
+        (
+            _settings.Model,
             [
-                new ChatMessage { Role = "system", Content = systemPrompt },
-                new ChatMessage { Role = "user", Content = userMessage }
+                new ChatMessage("system", systemPrompt),
+                new ChatMessage("user", userMessage)
             ]
-        };
+        );
 
         _logger.LogDebug("Sending request to {BaseUrl} with model {Model}", _settings.BaseUrl, _settings.Model);
 
@@ -60,25 +59,11 @@ internal sealed class LocalLlmProvider : ILlmProvider
         return completion.Choices[0].Message.Content;
     }
 
-    private sealed class ChatCompletionRequest
-    {
-        public required string Model { get; init; }
-        public required List<ChatMessage> Messages { get; init; }
-    }
+    private sealed record ChatCompletionRequest(string Model, List<ChatMessage> Messages);
 
-    private sealed class ChatMessage
-    {
-        public required string Role { get; init; }
-        public required string Content { get; init; }
-    }
+    private sealed record ChatMessage(string Role, string Content);
 
-    private sealed class ChatCompletionResponse
-    {
-        public required List<ChatChoice> Choices { get; init; }
-    }
+    private sealed record ChatCompletionResponse(List<ChatChoice> Choices);
 
-    private sealed class ChatChoice
-    {
-        public required ChatMessage Message { get; init; }
-    }
+    private sealed record ChatChoice(ChatMessage Message);
 }

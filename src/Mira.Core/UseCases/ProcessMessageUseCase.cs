@@ -3,7 +3,7 @@ using Mira.Core.Interfaces;
 
 namespace Mira.Core.UseCases;
 
-public class ProcessMessageUseCase
+public sealed class ProcessMessageUseCase
 {
     private readonly ILlmProvider _llmProvider;
     public ProcessMessageUseCase(ILlmProvider llmProvider)

@@ -1,12 +1,12 @@
-﻿using Mira.Core.Entities;
+using Mira.Core.Entities;
 
 namespace Mira.Core.Interfaces;
 
 public interface IMemoryRepository
 {
-    public Task SaveMemoryEntryAsync(MemoryEntry entry);
+    Task SaveMemoryEntryAsync(MemoryEntry entry, CancellationToken ct = default);
 
-    public Task<IReadOnlyList<MemoryEntry>> GetMemoryAsync(string query);
+    Task<IReadOnlyList<MemoryEntry>> SearchMemoryAsync(string query, CancellationToken ct = default);
 
-    public Task<IReadOnlyList<MemoryEntry>> GetRecentMemoryAsync(int count);
+    Task<IReadOnlyList<MemoryEntry>> GetRecentMemoryAsync(int count, CancellationToken ct = default);
 }

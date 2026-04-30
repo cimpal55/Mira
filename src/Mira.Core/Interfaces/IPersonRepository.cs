@@ -1,10 +1,10 @@
-﻿using Mira.Core.Entities;
+using Mira.Core.Entities;
 
 namespace Mira.Core.Interfaces;
 
 public interface IPersonRepository
 {
-    public Task<Person> FindPersonByNameAsync(string name);
-    public Task<IReadOnlyList<Person>> GetAllPeopleAsync();
-    public Task SavePersonAsync(Person person);
+    Task<Person?> FindPersonByNameAsync(string name, CancellationToken ct = default);
+    Task<IReadOnlyList<Person>> GetAllPeopleAsync(CancellationToken ct = default);
+    Task SavePersonAsync(Person person, CancellationToken ct = default);
 }
