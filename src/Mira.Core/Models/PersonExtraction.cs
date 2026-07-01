@@ -1,6 +1,6 @@
 ﻿namespace Mira.Core.Models;
 
-public sealed class PersonExtraction
+public sealed record PersonExtraction
 {
     public required string Name { get; set; }
     public string? RelationshipType { get; set; }

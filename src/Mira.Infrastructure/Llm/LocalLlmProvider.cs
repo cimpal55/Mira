@@ -37,6 +37,27 @@ internal sealed class LocalLlmProvider : ILlmProvider
         string userMessage,
         CancellationToken ct)
     {
+        return await GenerateRawAsync(systemPrompt, userMessage, ct);
+    }
+
+    public async Task<T> GenerateJsonAsync<T>(
+        string systemPrompt, 
+        string userMessage, 
+        CancellationToken ct)
+    {
+        var content = await GenerateRawAsync(systemPrompt, userMessage, ct);
+        var json = NormalizeJsonContent(content);
+
+        return JsonSerializer.Deserialize<T>(json, JsonOptions)
+            ?? throw new InvalidOperationException(
+                $"LLM returned invalid JSON for {typeof(T).Name}");
+    }
+
+    private async Task<string> GenerateRawAsync(
+        string systemPrompt,
+        string userMessage,
+        CancellationToken ct)
+    {
         var request = new ChatCompletionRequest
         (
             _settings.Model,
@@ -46,17 +67,44 @@ internal sealed class LocalLlmProvider : ILlmProvider
             ]
         );
 
-        _logger.LogDebug("Sending request to {BaseUrl} with model {Model}", _settings.BaseUrl, _settings.Model);
+        _logger.LogDebug(
+            "Sending request to {BaseUrl} with model {Model}",
+            _settings.BaseUrl,
+            _settings.Model);
 
         var response = await _httpClient.PostAsJsonAsync(
-            "/v1/chat/completions", request, JsonOptions, ct);
+            "/v1/chat/completions",
+            request,
+            JsonOptions,
+            ct);
 
         response.EnsureSuccessStatusCode();
 
-        var completion = await response.Content.ReadFromJsonAsync<ChatCompletionResponse>(JsonOptions, ct)
+        var completion = await response.Content.ReadFromJsonAsync<ChatCompletionResponse>(
+            JsonOptions,
+            ct)
             ?? throw new InvalidOperationException("LLM returned null response");
 
+        if (completion.Choices.Count == 0)
+            throw new InvalidOperationException("LLM returned no choices");
+
         return completion.Choices[0].Message.Content;
+    }
+
+    private static string NormalizeJsonContent(string content)
+    {
+        var trimmed = content.Trim();
+
+        if (trimmed.StartsWith("```json", StringComparison.OrdinalIgnoreCase))
+            trimmed = trimmed[7..].Trim();
+
+        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+            trimmed = trimmed[3..].Trim();
+
+        if (trimmed.EndsWith("```", StringComparison.Ordinal))
+            trimmed = trimmed[..^3].Trim();
+
+        return trimmed;
     }
 
     private sealed record ChatCompletionRequest(string Model, List<ChatMessage> Messages);

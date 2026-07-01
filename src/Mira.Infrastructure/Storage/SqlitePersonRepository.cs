@@ -17,7 +17,7 @@ internal sealed class SqlitePersonRepository(IOptions<StorageSettings> options) 
 
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT id, name, interests, updated_at
+            SELECT id, name, relationship_type, notes, updated_at
             FROM people
             WHERE name = $name COLLATE NOCASE
             LIMIT 1
@@ -32,8 +32,9 @@ internal sealed class SqlitePersonRepository(IOptions<StorageSettings> options) 
         {
             Id = reader.GetInt32(0),
             Name = reader.GetString(1),
-            Interests = reader.GetString(2),
-            UpdatedAt = DateTime.Parse(reader.GetString(3))
+            RelationshipType = reader.GetString(2),
+            Notes = reader.GetString(3),
+            UpdatedAt = DateTime.Parse(reader.GetString(4))
         };
     }
 
@@ -43,7 +44,7 @@ internal sealed class SqlitePersonRepository(IOptions<StorageSettings> options) 
         await connection.OpenAsync(ct);
 
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT id, name, interests, updated_at FROM people ORDER BY name";
+        command.CommandText = "SELECT id, name, relationship_type, notes, updated_at FROM people ORDER BY name";
 
         await using var reader = await command.ExecuteReaderAsync(ct);
         var people = new List<Person>();
@@ -54,8 +55,9 @@ internal sealed class SqlitePersonRepository(IOptions<StorageSettings> options) 
             {
                 Id = reader.GetInt32(0),
                 Name = reader.GetString(1),
-                Interests = reader.GetString(2),
-                UpdatedAt = DateTime.Parse(reader.GetString(3))
+                RelationshipType = reader.GetString(2),
+                Notes = reader.GetString(3),
+                UpdatedAt = DateTime.Parse(reader.GetString(4))
             });
         }
 
@@ -71,14 +73,16 @@ internal sealed class SqlitePersonRepository(IOptions<StorageSettings> options) 
 
         // Upsert: update if name exists, insert otherwise
         command.CommandText = """
-            INSERT INTO people (name, interests, updated_at)
-            VALUES ($name, $interests, $updatedAt)
+            INSERT INTO people (name, relationship_type, notes, updated_at)
+            VALUES ($name, $relationshipType, $notes, $updatedAt)
             ON CONFLICT(name) DO UPDATE SET
-                interests = $interests,
+                relationship_type = $relationshipType,
+                notes = $notes,
                 updated_at = $updatedAt
             """;
         command.Parameters.AddWithValue("$name", person.Name);
-        command.Parameters.AddWithValue("$interests", person.Interests);
+        command.Parameters.AddWithValue("$relationshipType", person.RelationshipType);
+        command.Parameters.AddWithValue("$notes", person.Notes);
         command.Parameters.AddWithValue("$updatedAt", person.UpdatedAt.ToString("O"));
 
         await command.ExecuteNonQueryAsync(ct);

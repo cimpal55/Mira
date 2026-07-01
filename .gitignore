@@ -60,3 +60,8 @@ appsettings.*.json
 ## OS
 .DS_Store
 Thumbs.db
+
+*.db
+*.db-shm
+*.db-wal
+nul

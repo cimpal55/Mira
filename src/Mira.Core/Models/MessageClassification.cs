@@ -2,7 +2,7 @@
 
 namespace Mira.Core.Models;
 
-public sealed class MessageClassification
+public sealed record MessageClassification
 {
     public string Type { get; set; } = string.Empty;
     public PersonExtraction? Person { get; set; }
