@@ -115,6 +115,16 @@ public sealed class ProcessMessageUseCase(
             return await ReplyAsync(message, await GenerateTodayDashboardAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         }
 
+        if (IsCommand(text, "/dashboard"))
+        {
+            return await ReplyAsync(message, DashboardSectionText(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/status"))
+        {
+            return await ReplyAsync(message, StatusSectionText(), cancellationToken).ConfigureAwait(false);
+        }
+
         if (IsCommand(text, "/chat"))
         {
             return await ReplyAsync(message, ChatSectionText(), cancellationToken).ConfigureAwait(false);
@@ -172,18 +182,19 @@ public sealed class ProcessMessageUseCase(
         if (IsCommand(text, "/people"))
         {
             var people = await memoryStore.GetByCategoryAsync(MemoryCategory.Person, 20, cancellationToken).ConfigureAwait(false);
-            return await ReplyAsync(message, FormatMemories("People", people), cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatMemoryFolder("People", people), cancellationToken).ConfigureAwait(false);
         }
 
         if (IsCommand(text, "/decisions"))
         {
             var decisions = await memoryStore.GetByCategoryAsync(MemoryCategory.Decision, 20, cancellationToken).ConfigureAwait(false);
-            return await ReplyAsync(message, FormatMemories("Decisions", decisions), cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatMemoryFolder("Decisions", decisions), cancellationToken).ConfigureAwait(false);
         }
 
         if (IsCommand(text, "/health"))
         {
-            return await ReplyAsync(message, await GenerateHealthSummaryAsync(text, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            var summary = await GenerateHealthSummaryAsync(text, cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatHealthSection(summary), cancellationToken).ConfigureAwait(false);
         }
 
         if (IsCommand(text, "/reminders"))
@@ -800,11 +811,13 @@ Mira folders
 /chat — AI Chat with saved context
 /reminders — reminders and alerts
 /memory — saved memories, search, people, decisions
+/dashboard — local static memory dashboard
 /notes — daily notes, today, brief, weekly review
 /health — health summary
 /people — saved people
 /decisions — saved decisions
-/settings — local runtime status
+/settings — local settings
+/status — local runtime and alert status
 
 Use /help for every command.
 """;
@@ -835,6 +848,7 @@ Commands:
 - /remember <text> — save text and extract memory
 - /capture <text> — save raw notes quickly
 - /search <text> — search saved memories
+- /dashboard — show local static UI and Markdown dashboard paths
 - /people — list saved people
 - /profile <name> — summarize a person
 - /decisions — list saved decisions
@@ -859,6 +873,33 @@ Commands:
 """;
     }
 
+    private string DashboardSectionText()
+    {
+        return $"""
+Dashboard
+
+Local static UI: {settings.KnowledgeDashboardHtmlPath}
+Markdown index: {settings.KnowledgeDashboardPath}
+Telegram alerts: enabled; proactive reminders and alerts still arrive in this Telegram chat.
+""";
+    }
+
+    private string StatusSectionText()
+    {
+        return $"""
+Status
+
+Local-first mode: enabled
+Time zone: {settings.TimeZone.Id}
+Max context memories: {settings.MaxContextMemories}
+Max reply characters: {settings.MaxReplyCharacters}
+Medical safety boundary: enabled
+Local static UI: {settings.KnowledgeDashboardHtmlPath}
+Markdown index: {settings.KnowledgeDashboardPath}
+Telegram alerts: enabled; proactive reminders and alerts still arrive in this Telegram chat.
+""";
+    }
+
     private string SettingsSectionText()
     {
         return $"""
@@ -869,11 +910,29 @@ Time zone: {settings.TimeZone.Id}
 Max context memories: {settings.MaxContextMemories}
 Max reply characters: {settings.MaxReplyCharacters}
 Medical safety boundary: enabled
-Memory dashboard: {settings.KnowledgeDashboardPath}
+Local static UI: {settings.KnowledgeDashboardHtmlPath}
+Markdown index: {settings.KnowledgeDashboardPath}
+Telegram alerts: enabled; proactive reminders and alerts still arrive in this Telegram chat.
+
+Useful commands:
+- /dashboard — show local UI and Markdown paths
+- /status — show runtime and Telegram alert status
 
 Secrets are loaded from configuration/environment and are never shown here.
 """;
     }
+
+    private static string FormatMemoryFolder(string heading, IReadOnlyList<MemoryItem> memories)
+    {
+        if (memories.Count == 0)
+        {
+            return $"{heading}\n\nNo {heading.ToLowerInvariant()} saved yet.";
+        }
+
+        return heading + "\n\n" + string.Join("\n", memories.Select(memory => $"- {memory.Id}: {memory.Title} — {memory.Content}"));
+    }
+
+    private static string FormatHealthSection(string summary) => $"Health\n\n{summary}";
 
     private static string FormatMemories(string heading, IReadOnlyList<MemoryItem> memories)
     {
@@ -1018,8 +1077,10 @@ Mira local assistant commands:
 /chat — open simple AI chat folder
 /reminders — open reminders folder and list pending reminders
 /memory — open saved memory folder
+/dashboard — show local static UI and Markdown dashboard paths
 /notes — open daily notes folder
 /settings — show local runtime status
+/status — show local runtime and Telegram alert status
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory
 /note <text> — save a deterministic daily note

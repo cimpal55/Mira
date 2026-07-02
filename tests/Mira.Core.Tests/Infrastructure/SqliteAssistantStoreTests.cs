@@ -90,7 +90,7 @@ public sealed class SqliteAssistantStoreTests
         var item = await fixture.Store.UpsertAsync(new MemoryUpsert(
             MemoryCategory.Person,
             "Maxim keyboard preferences",
-            "Maxim likes mechanical keyboards and artisan keycaps",
+            "Maxim likes <mechanical> keyboards & artisan keycaps",
             "Maxim",
             ["keyboard"],
             0.9,
@@ -103,13 +103,27 @@ public sealed class SqliteAssistantStoreTests
         Assert.Contains("# Mira Memory Dashboard", markdown);
         Assert.Contains("- Person: 1", markdown);
         Assert.Contains("[Maxim keyboard preferences](../2-atoms/Person/", markdown);
-        Assert.Contains("Maxim likes mechanical keyboards", markdown);
+        Assert.Contains("Maxim likes <mechanical> keyboards & artisan keycaps", markdown);
+        var htmlPath = Path.Combine(fixture.KnowledgeRootPath, "0-dashboard", "index.html");
+        Assert.True(File.Exists(htmlPath));
+        var html = await File.ReadAllTextAsync(htmlPath, TestContext.Current.CancellationToken);
+        Assert.Contains("Mira Memory Dashboard", html);
+        Assert.Contains("search", html, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Person", html);
+        Assert.Contains("1", html);
+        Assert.Contains("../2-atoms/Person/", html);
+        Assert.Contains("Maxim keyboard preferences", html);
+        Assert.Contains("Maxim likes &lt;mechanical&gt; keyboards &amp; artisan keycaps", html);
+        Assert.DoesNotContain("Maxim likes <mechanical> keyboards & artisan keycaps", html);
 
         await fixture.Store.DeleteAsync(item.Id, TestContext.Current.CancellationToken);
 
         var updated = await File.ReadAllTextAsync(dashboardPath, TestContext.Current.CancellationToken);
         Assert.DoesNotContain("Maxim keyboard preferences", updated);
         Assert.Contains("No saved memories yet.", updated);
+        var updatedHtml = await File.ReadAllTextAsync(htmlPath, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("Maxim keyboard preferences", updatedHtml);
+        Assert.Contains("No saved memories yet.", updatedHtml);
     }
 
 

@@ -106,6 +106,7 @@ public sealed class ProcessMessageUseCaseTests
         Assert.Contains("/chat", menu.Text);
         Assert.Contains("/reminders", menu.Text);
         Assert.Contains("/memory", menu.Text);
+        Assert.Contains("/dashboard", menu.Text);
         Assert.Equal(menu.Text, start.Text);
         Assert.Empty(llm.Requests);
     }
@@ -122,7 +123,22 @@ public sealed class ProcessMessageUseCaseTests
         Assert.Contains("/memory", reply.Text);
         Assert.Contains("/notes", reply.Text);
         Assert.Contains("/settings", reply.Text);
+        Assert.Contains("/dashboard", reply.Text);
         Assert.Contains("/remember <text>", reply.Text);
+    }
+
+    [Fact]
+    public async Task DashboardCommand_returns_local_paths_and_alert_note_without_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var useCase = CreateUseCase(llm);
+
+        var reply = await useCase.HandleAsync(Message("/dashboard"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("0-dashboard/index.html", reply.Text);
+        Assert.Contains("0-dashboard/memory.md", reply.Text);
+        Assert.Contains("Telegram alerts", reply.Text);
+        Assert.Empty(llm.Requests);
     }
 
     [Fact]
@@ -388,7 +404,8 @@ public sealed class ProcessMessageUseCaseTests
 
         var reply = await useCase.HandleAsync(Message("/health"), TestContext.Current.CancellationToken);
 
-        Assert.StartsWith(MedicalBoundary, reply.Text);
+        Assert.StartsWith("Health", reply.Text);
+        Assert.Contains(MedicalBoundary, reply.Text);
     }
 
 
@@ -458,7 +475,13 @@ public sealed class ProcessMessageUseCaseTests
             automationRunner ?? new FakeAutomationRunner(),
             new FakeArtifactWriter(),
             clock ?? new FakeClock(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero)),
-            new AssistantRuntimeSettings(timeZone ?? TimeZoneInfo.Utc, 8, 3500, MedicalBoundary, "%LOCALAPPDATA%/Mira/knowledge/0-dashboard/memory.md"));
+            new AssistantRuntimeSettings(
+                TimeZone: timeZone ?? TimeZoneInfo.Utc,
+                MaxContextMemories: 8,
+                MaxReplyCharacters: 3500,
+                MedicalBoundaryMessage: MedicalBoundary,
+                KnowledgeDashboardPath: "%LOCALAPPDATA%/Mira/knowledge/0-dashboard/memory.md",
+                KnowledgeDashboardHtmlPath: "%LOCALAPPDATA%/Mira/knowledge/0-dashboard/index.html"));
     }
 
     private static IncomingMessage Message(string text) => new(123, 456, text, new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero));

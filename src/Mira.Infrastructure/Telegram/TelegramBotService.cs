@@ -26,11 +26,13 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         "/chat",
         "/reminders",
         "/memory",
+        "/dashboard",
         "/health",
         "/people",
         "/decisions",
         "/notes",
-        "/settings"
+        "/settings",
+        "/status"
     };
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelegramBotService> _logger;
@@ -277,15 +279,19 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             ],
             [
                 InlineKeyboardButton.WithCallbackData("Memory", CommandCallbackPrefix + "/memory"),
-                InlineKeyboardButton.WithCallbackData("Health", CommandCallbackPrefix + "/health")
+                InlineKeyboardButton.WithCallbackData("Dashboard", CommandCallbackPrefix + "/dashboard")
             ],
             [
-                InlineKeyboardButton.WithCallbackData("People", CommandCallbackPrefix + "/people"),
-                InlineKeyboardButton.WithCallbackData("Decisions", CommandCallbackPrefix + "/decisions")
+                InlineKeyboardButton.WithCallbackData("Health", CommandCallbackPrefix + "/health"),
+                InlineKeyboardButton.WithCallbackData("People", CommandCallbackPrefix + "/people")
             ],
             [
-                InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes"),
-                InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings")
+                InlineKeyboardButton.WithCallbackData("Decisions", CommandCallbackPrefix + "/decisions"),
+                InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes")
+            ],
+            [
+                InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings"),
+                InlineKeyboardButton.WithCallbackData("Status", CommandCallbackPrefix + "/status")
             ]
         ]);
     }
@@ -297,8 +303,13 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         return text.StartsWith("AI Chat", StringComparison.Ordinal)
             || text.StartsWith("Reminders", StringComparison.Ordinal)
             || text.StartsWith("Memory", StringComparison.Ordinal)
+            || text.StartsWith("Dashboard", StringComparison.Ordinal)
             || text.StartsWith("Daily Notes", StringComparison.Ordinal)
-            || text.StartsWith("Settings", StringComparison.Ordinal);
+            || text.StartsWith("Health", StringComparison.Ordinal)
+            || text.StartsWith("People", StringComparison.Ordinal)
+            || text.StartsWith("Decisions", StringComparison.Ordinal)
+            || text.StartsWith("Settings", StringComparison.Ordinal)
+            || text.StartsWith("Status", StringComparison.Ordinal);
     }
 
     private static Guid? ExtractConfirmId(string text)
@@ -323,8 +334,10 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             new BotCommand { Command = "chat", Description = "Open AI chat folder" },
             new BotCommand { Command = "reminders", Description = "Open reminders folder" },
             new BotCommand { Command = "memory", Description = "Open memory folder" },
+            new BotCommand { Command = "dashboard", Description = "Show local memory dashboard paths" },
             new BotCommand { Command = "notes", Description = "Open daily notes folder" },
             new BotCommand { Command = "settings", Description = "Show local settings" },
+            new BotCommand { Command = "status", Description = "Show local runtime and alert status" },
             new BotCommand { Command = "capture", Description = "Save text and extract memory" },
             new BotCommand { Command = "remember", Description = "Save text and extract memory" },
             new BotCommand { Command = "note", Description = "Save a daily note" },

@@ -5,4 +5,5 @@ public sealed record AssistantRuntimeSettings(
     int MaxContextMemories,
     int MaxReplyCharacters,
     string MedicalBoundaryMessage,
-    string KnowledgeDashboardPath);
+    string KnowledgeDashboardPath,
+    string KnowledgeDashboardHtmlPath);
