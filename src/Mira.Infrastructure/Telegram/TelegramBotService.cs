@@ -19,6 +19,19 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
 {
     private const int TelegramChunkSize = 3900;
     private const string ConfirmCallbackPrefix = "confirm:";
+    private const string CommandCallbackPrefix = "command:";
+    private static readonly HashSet<string> CallbackCommands = new(StringComparer.Ordinal)
+    {
+        "/menu",
+        "/chat",
+        "/reminders",
+        "/memory",
+        "/health",
+        "/people",
+        "/decisions",
+        "/notes",
+        "/settings"
+    };
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ILogger<TelegramBotService> _logger;
     private readonly TelegramSettings _settings;
@@ -108,13 +121,31 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             return;
         }
 
-        if (callbackQuery.Data is null || !callbackQuery.Data.StartsWith(ConfirmCallbackPrefix, StringComparison.Ordinal))
+        var data = callbackQuery.Data;
+        if (data is null)
         {
             await botClient.AnswerCallbackQuery(callbackQuery.Id, "Unsupported Mira action.", cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        var idText = callbackQuery.Data[ConfirmCallbackPrefix.Length..];
+        if (data.StartsWith(ConfirmCallbackPrefix, StringComparison.Ordinal))
+        {
+            await HandleConfirmCallbackAsync(botClient, callbackQuery, message, data, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (data.StartsWith(CommandCallbackPrefix, StringComparison.Ordinal))
+        {
+            await HandleCommandCallbackAsync(botClient, callbackQuery, message, data, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await botClient.AnswerCallbackQuery(callbackQuery.Id, "Unsupported Mira action.", cancellationToken: cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleConfirmCallbackAsync(ITelegramBotClient botClient, CallbackQuery callbackQuery, Message message, string data, CancellationToken cancellationToken)
+    {
+        var idText = data[ConfirmCallbackPrefix.Length..];
         if (!Guid.TryParse(idText, out var id))
         {
             await botClient.AnswerCallbackQuery(callbackQuery.Id, "Invalid confirmation id.", cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -129,6 +160,35 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             var reply = await useCase.HandleAsync(incoming, cancellationToken).ConfigureAwait(false);
             await botClient.AnswerCallbackQuery(callbackQuery.Id, "Confirmed.", cancellationToken: cancellationToken).ConfigureAwait(false);
             await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Local error while processing Telegram callback.");
+            await botClient.AnswerCallbackQuery(callbackQuery.Id, "Mira hit a local error.", cancellationToken: cancellationToken).ConfigureAwait(false);
+            await SendChunksAsync(
+                message.Chat.Id,
+                "I hit a local error while processing that. Check the Mira logs on the PC.",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleCommandCallbackAsync(ITelegramBotClient botClient, CallbackQuery callbackQuery, Message message, string data, CancellationToken cancellationToken)
+    {
+        var command = data[CommandCallbackPrefix.Length..];
+        if (!CallbackCommands.Contains(command))
+        {
+            await botClient.AnswerCallbackQuery(callbackQuery.Id, "Unsupported Mira folder.", cancellationToken: cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var useCase = scope.ServiceProvider.GetRequiredService<ProcessMessageUseCase>();
+            var incoming = new IncomingMessage(message.Chat.Id, message.MessageId, command, DateTimeOffset.UtcNow);
+            var reply = await useCase.HandleAsync(incoming, cancellationToken).ConfigureAwait(false);
+            await botClient.AnswerCallbackQuery(callbackQuery.Id, "Opened.", cancellationToken: cancellationToken).ConfigureAwait(false);
+            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken, BuildReplyMarkup(reply.Text)).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -192,9 +252,53 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     private static InlineKeyboardMarkup? BuildReplyMarkup(string text)
     {
         var confirmId = ExtractConfirmId(text);
-        return confirmId is null
-            ? null
-            : new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Confirm automation", ConfirmCallbackPrefix + confirmId.Value));
+        if (confirmId is not null)
+        {
+            return new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Confirm automation", ConfirmCallbackPrefix + confirmId.Value));
+        }
+
+        if (IsFolderMenuText(text))
+        {
+            return BuildFolderMenuMarkup();
+        }
+
+        return IsFolderSectionText(text)
+            ? new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Back to menu", CommandCallbackPrefix + "/menu"))
+            : null;
+    }
+
+    private static InlineKeyboardMarkup BuildFolderMenuMarkup()
+    {
+        return new InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton.WithCallbackData("AI Chat", CommandCallbackPrefix + "/chat"),
+                InlineKeyboardButton.WithCallbackData("Reminders", CommandCallbackPrefix + "/reminders")
+            ],
+            [
+                InlineKeyboardButton.WithCallbackData("Memory", CommandCallbackPrefix + "/memory"),
+                InlineKeyboardButton.WithCallbackData("Health", CommandCallbackPrefix + "/health")
+            ],
+            [
+                InlineKeyboardButton.WithCallbackData("People", CommandCallbackPrefix + "/people"),
+                InlineKeyboardButton.WithCallbackData("Decisions", CommandCallbackPrefix + "/decisions")
+            ],
+            [
+                InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes"),
+                InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings")
+            ]
+        ]);
+    }
+
+    private static bool IsFolderMenuText(string text) => text.StartsWith("Mira folders", StringComparison.Ordinal);
+
+    private static bool IsFolderSectionText(string text)
+    {
+        return text.StartsWith("AI Chat", StringComparison.Ordinal)
+            || text.StartsWith("Reminders", StringComparison.Ordinal)
+            || text.StartsWith("Memory", StringComparison.Ordinal)
+            || text.StartsWith("Daily Notes", StringComparison.Ordinal)
+            || text.StartsWith("Settings", StringComparison.Ordinal);
     }
 
     private static Guid? ExtractConfirmId(string text)
@@ -215,6 +319,12 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     {
         return
         [
+            new BotCommand { Command = "menu", Description = "Show folder menu" },
+            new BotCommand { Command = "chat", Description = "Open AI chat folder" },
+            new BotCommand { Command = "reminders", Description = "Open reminders folder" },
+            new BotCommand { Command = "memory", Description = "Open memory folder" },
+            new BotCommand { Command = "notes", Description = "Open daily notes folder" },
+            new BotCommand { Command = "settings", Description = "Show local settings" },
             new BotCommand { Command = "capture", Description = "Save text and extract memory" },
             new BotCommand { Command = "remember", Description = "Save text and extract memory" },
             new BotCommand { Command = "note", Description = "Save a daily note" },
@@ -225,7 +335,8 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             new BotCommand { Command = "stale", Description = "Review stale memories" },
             new BotCommand { Command = "brief", Description = "Generate daily brief" },
             new BotCommand { Command = "review", Description = "Generate weekly review" },
-            new BotCommand { Command = "reminders", Description = "List pending reminders" },
+            new BotCommand { Command = "people", Description = "List saved people" },
+            new BotCommand { Command = "decisions", Description = "List saved decisions" },
             new BotCommand { Command = "health", Description = "Summarize recent health entries" },
             new BotCommand { Command = "help", Description = "Show Mira commands" }
         ];

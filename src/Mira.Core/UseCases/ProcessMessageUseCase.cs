@@ -81,7 +81,12 @@ public sealed class ProcessMessageUseCase(
 
     private async Task<AssistantReply?> TryHandleCommandAsync(IncomingMessage message, string text, CancellationToken cancellationToken)
     {
-        if (IsCommand(text, "/start") || IsCommand(text, "/help"))
+        if (IsCommand(text, "/start") || IsCommand(text, "/menu"))
+        {
+            return await ReplyAsync(message, MenuText(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/help"))
         {
             return await ReplyAsync(message, HelpText(), cancellationToken).ConfigureAwait(false);
         }
@@ -107,6 +112,26 @@ public sealed class ProcessMessageUseCase(
         if (IsCommand(text, "/today"))
         {
             return await ReplyAsync(message, await GenerateTodayDashboardAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/chat"))
+        {
+            return await ReplyAsync(message, ChatSectionText(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/memory"))
+        {
+            return await ReplyAsync(message, MemorySectionText(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/notes"))
+        {
+            return await ReplyAsync(message, NotesSectionText(), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/settings"))
+        {
+            return await ReplyAsync(message, SettingsSectionText(), cancellationToken).ConfigureAwait(false);
         }
 
         if (TryGetCommandArgument(text, "/note", out var noteText))
@@ -163,7 +188,7 @@ public sealed class ProcessMessageUseCase(
         if (IsCommand(text, "/reminders"))
         {
             var reminders = await reminderStore.GetPendingAsync(20, cancellationToken).ConfigureAwait(false);
-            return await ReplyAsync(message, FormatReminders(reminders), cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatRemindersSection(reminders), cancellationToken).ConfigureAwait(false);
         }
 
         if (TryGetCommandArgument(text, "/forget", out var forgetId))
@@ -732,6 +757,88 @@ Health context:
 
     private static DateTimeOffset ToUtc(DateTimeOffset value) => value.ToUniversalTime();
 
+    private string MenuText()
+    {
+        return """
+Mira folders
+
+/chat — AI Chat with saved context
+/reminders — reminders and alerts
+/memory — saved memories, search, people, decisions
+/notes — daily notes, today, brief, weekly review
+/health — health summary
+/people — saved people
+/decisions — saved decisions
+/settings — local runtime status
+
+Use /help for every command.
+""";
+    }
+
+    private static string ChatSectionText()
+    {
+        return """
+AI Chat
+
+Send a normal message and Mira will answer using local context when saved memory matches.
+
+Useful commands:
+- /menu — switch folders
+- /search <text> — search saved memory first
+- /remember <text> — save durable context
+""";
+    }
+
+    private static string MemorySectionText()
+    {
+        return """
+Memory
+
+Use this folder for saved facts and review.
+
+Commands:
+- /remember <text> — save text and extract memory
+- /capture <text> — save raw notes quickly
+- /search <text> — search saved memories
+- /people — list saved people
+- /profile <name> — summarize a person
+- /decisions — list saved decisions
+- /uncertain — review low-confidence memories
+- /stale — review memories older than 90 days
+- /forget <guid> — delete a memory item
+""";
+    }
+
+    private static string NotesSectionText()
+    {
+        return """
+Daily Notes
+
+Use this folder for daily logs, summaries, and reviews.
+
+Commands:
+- /note <text> — save a deterministic daily note
+- /today — today's reminders and new memories
+- /brief — generate today's local daily brief
+- /review — generate this week's review
+""";
+    }
+
+    private string SettingsSectionText()
+    {
+        return $"""
+Settings
+
+Local-first mode: enabled
+Time zone: {settings.TimeZone.Id}
+Max context memories: {settings.MaxContextMemories}
+Max reply characters: {settings.MaxReplyCharacters}
+Medical safety boundary: enabled
+
+Secrets are loaded from configuration/environment and are never shown here.
+""";
+    }
+
     private static string FormatMemories(string heading, IReadOnlyList<MemoryItem> memories)
     {
         if (memories.Count == 0)
@@ -740,6 +847,22 @@ Health context:
         }
 
         return heading + ":\n" + string.Join("\n", memories.Select(memory => $"- {memory.Id}: {memory.Title} — {memory.Content}"));
+    }
+
+    private string FormatRemindersSection(IReadOnlyList<Reminder> reminders)
+    {
+        return """
+Reminders
+
+Use this folder for reminders and alerts.
+
+Commands:
+- Send a normal reminder request, for example: remind me tomorrow at 10 to stretch
+- /reminders — refresh pending reminders
+- /cancel <guid> — cancel a reminder
+- /today — today's reminders and new memories
+
+""" + FormatReminders(reminders);
     }
 
     private string FormatReminders(IReadOnlyList<Reminder> reminders)
@@ -854,7 +977,13 @@ Health context:
     {
         return """
 Mira local assistant commands:
-/start or /help — show this list
+/start or /menu — show folder menu
+/help — show this detailed command list
+/chat — open simple AI chat folder
+/reminders — open reminders folder and list pending reminders
+/memory — open saved memory folder
+/notes — open daily notes folder
+/settings — show local runtime status
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory
 /note <text> — save a deterministic daily note
@@ -868,7 +997,6 @@ Mira local assistant commands:
 /people — list saved people
 /decisions — list saved decisions
 /health — summarize recent health entries
-/reminders — list pending reminders
 /forget <guid> — delete a memory item
 /cancel <guid> — cancel a reminder
 /confirm <guid> — run a staged local automation

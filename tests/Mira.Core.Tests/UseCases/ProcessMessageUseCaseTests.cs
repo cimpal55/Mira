@@ -94,6 +94,79 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task MenuCommand_returns_folder_menu_without_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var useCase = CreateUseCase(llm);
+
+        var menu = await useCase.HandleAsync(Message("/menu"), TestContext.Current.CancellationToken);
+        var start = await useCase.HandleAsync(Message("/start"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("Mira folders", menu.Text);
+        Assert.Contains("/chat", menu.Text);
+        Assert.Contains("/reminders", menu.Text);
+        Assert.Contains("/memory", menu.Text);
+        Assert.Equal(menu.Text, start.Text);
+        Assert.Empty(llm.Requests);
+    }
+
+    [Fact]
+    public async Task HelpCommand_includes_folder_commands()
+    {
+        var useCase = CreateUseCase();
+
+        var reply = await useCase.HandleAsync(Message("/help"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("/menu", reply.Text);
+        Assert.Contains("/chat", reply.Text);
+        Assert.Contains("/memory", reply.Text);
+        Assert.Contains("/notes", reply.Text);
+        Assert.Contains("/settings", reply.Text);
+        Assert.Contains("/remember <text>", reply.Text);
+    }
+
+    [Fact]
+    public async Task FolderCommands_return_deterministic_sections_without_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var useCase = CreateUseCase(llm);
+
+        var chat = await useCase.HandleAsync(Message("/chat"), TestContext.Current.CancellationToken);
+        var memory = await useCase.HandleAsync(Message("/memory"), TestContext.Current.CancellationToken);
+        var notes = await useCase.HandleAsync(Message("/notes"), TestContext.Current.CancellationToken);
+        var settings = await useCase.HandleAsync(Message("/settings"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("AI Chat", chat.Text);
+        Assert.Contains("/remember <text>", memory.Text);
+        Assert.StartsWith("Daily Notes", notes.Text);
+        Assert.Contains("Local-first mode: enabled", settings.Text);
+        Assert.Empty(llm.Requests);
+    }
+
+    [Fact]
+    public async Task RemindersCommand_returns_folder_dashboard_with_pending_reminders()
+    {
+        var id = Guid.Parse("50000000-0000-0000-0000-000000000001");
+        var reminders = new FakeReminderStore
+        {
+            GetPendingHandler = limit =>
+            {
+                Assert.Equal(20, limit);
+                return [new Reminder(id, "Stretch", null, new DateTimeOffset(2026, 7, 1, 9, 0, 0, TimeSpan.Zero), ReminderRepeatKind.None, ReminderStatus.Pending, DateTimeOffset.UtcNow, null, null)];
+            }
+        };
+        var useCase = CreateUseCase(new FakeLlmProvider(), reminderStore: reminders);
+
+        var reply = await useCase.HandleAsync(Message("/reminders"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Reminders", reply.Text);
+        Assert.Contains("/cancel <guid>", reply.Text);
+        Assert.Contains("Pending reminders:", reply.Text);
+        Assert.Contains("Stretch", reply.Text);
+    }
+
+
+    [Fact]
     public async Task NoteCommand_saves_daily_note_without_llm()
     {
         var llm = new FakeLlmProvider();
