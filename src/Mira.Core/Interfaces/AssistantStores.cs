@@ -6,6 +6,8 @@ public interface IMemoryStore
 {
     Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default);
 
+    Task<IReadOnlyList<ConversationMessage>> GetRecentConversationAsync(long chatId, int limit, DateTimeOffset beforeUtc, CancellationToken cancellationToken = default);
+
     Task<string> SaveRawCaptureAsync(string content, DateTimeOffset createdAtUtc, CancellationToken cancellationToken = default);
 
     Task<MemoryItem> UpsertAsync(MemoryUpsert request, CancellationToken cancellationToken = default);

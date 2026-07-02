@@ -64,11 +64,13 @@ public static class DependencyInjection
         services.AddSingleton(provider =>
         {
             var proactive = provider.GetRequiredService<IOptions<ProactiveSettings>>().Value;
+            var storage = provider.GetRequiredService<IOptions<StorageSettings>>().Value;
             return new AssistantRuntimeSettings(
                 ProactiveSchedule.ResolveTimeZone(proactive),
                 MaxContextMemories: 8,
                 MaxReplyCharacters: 3500,
-                MedicalBoundaryMessage: "I can organize your saved medical information, but I cannot make medical decisions or change treatment. Confirm medication and dosage questions with a qualified clinician.");
+                MedicalBoundaryMessage: "I can organize your saved medical information, but I cannot make medical decisions or change treatment. Confirm medication and dosage questions with a qualified clinician.",
+                KnowledgeDashboardPath: StoragePathResolver.CombineKnowledgePath(storage, Path.Combine("0-dashboard", "memory.md")));
         });
 
         services.AddSingleton<TelegramBotService>();

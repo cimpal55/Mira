@@ -46,6 +46,28 @@ VALUES (@chat_id, @telegram_message_id, @direction, @content, @created_utc);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<IReadOnlyList<ConversationMessage>> GetRecentConversationAsync(long chatId, int limit, DateTimeOffset beforeUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+SELECT chat_id, telegram_message_id, direction, content, created_utc
+FROM (
+    SELECT chat_id, telegram_message_id, direction, content, created_utc, id
+    FROM conversation_messages
+    WHERE chat_id = @chat_id AND created_utc < @before_utc
+    ORDER BY created_utc DESC, id DESC
+    LIMIT @limit
+)
+ORDER BY created_utc ASC, id ASC;
+""";
+        Add(command, "@chat_id", chatId);
+        Add(command, "@before_utc", FormatUtc(beforeUtc));
+        Add(command, "@limit", NormalizeLimit(limit));
+        return await ReadConversationMessagesAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
+
     public async Task<string> SaveRawCaptureAsync(string content, DateTimeOffset createdAtUtc, CancellationToken cancellationToken = default)
     {
         for (var attempt = 0; attempt < 10; attempt++)
@@ -131,6 +153,7 @@ VALUES (@id, @category, @title, @subject, @content, @tags_json, @confidence, @so
         }
 
         await _markdownWriter.WriteAtomAsync(item, cancellationToken).ConfigureAwait(false);
+        await RefreshMemoryDashboardAsync(cancellationToken).ConfigureAwait(false);
         return item;
     }
 
@@ -256,6 +279,8 @@ LIMIT @limit;
             transaction.Rollback();
             throw;
         }
+
+        await RefreshMemoryDashboardAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<Reminder> AddAsync(ReminderCreateRequest request, CancellationToken cancellationToken = default)
@@ -531,11 +556,34 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task RefreshMemoryDashboardAsync(CancellationToken cancellationToken)
+    {
+        var items = await GetRecentAsync(_settings.DashboardMemoryLimit, null, cancellationToken).ConfigureAwait(false);
+        await _markdownWriter.WriteMemoryDashboardAsync(items, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<SqliteConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
         var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken).ConfigureAwait(false);
         return connection;
+    }
+
+    private static async Task<IReadOnlyList<ConversationMessage>> ReadConversationMessagesAsync(SqliteCommand command, CancellationToken cancellationToken)
+    {
+        var messages = new List<ConversationMessage>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            messages.Add(new ConversationMessage(
+                reader.GetInt64(0),
+                reader.GetInt64(1),
+                Enum.Parse<ConversationDirection>(reader.GetString(2)),
+                reader.GetString(3),
+                ParseUtc(reader.GetString(4))));
+        }
+
+        return messages;
     }
 
     private static async Task<IReadOnlyList<MemoryItem>> ReadMemoryItemsAsync(SqliteCommand command, CancellationToken cancellationToken)

@@ -13,4 +13,7 @@ public sealed class StorageSettings
     public string KnowledgeRootPath { get; set; } = "%LOCALAPPDATA%/Mira/knowledge";
 
     public bool EnableMarkdownMirror { get; set; } = true;
+
+    [Range(1, 5000)]
+    public int DashboardMemoryLimit { get; set; } = 1000;
 }

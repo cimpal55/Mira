@@ -75,6 +75,26 @@ public sealed class KnowledgeMarkdownWriter(
         await WriteArtifactAsync(Path.Combine("3-threads", SafeFileName(fileName)), content, "thread", cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task WriteMemoryDashboardAsync(IReadOnlyList<MemoryItem> items, CancellationToken cancellationToken = default)
+    {
+        if (!_settings.EnableMarkdownMirror)
+        {
+            return;
+        }
+
+        try
+        {
+            var path = StoragePathResolver.CombineKnowledgePath(_settings, Path.Combine("0-dashboard", "memory.md"));
+            Directory.CreateDirectory(Path.GetDirectoryName(path) ?? StoragePathResolver.ExpandPath(_settings.KnowledgeRootPath));
+            await File.WriteAllTextAsync(path, BuildMemoryDashboardMarkdown(items), Encoding.UTF8, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Failed to write memory dashboard Markdown mirror.");
+        }
+    }
+
+
     private async Task WriteArtifactAsync(string relativePath, string content, string artifactKind, CancellationToken cancellationToken)
     {
         if (!_settings.EnableMarkdownMirror)
@@ -96,9 +116,14 @@ public sealed class KnowledgeMarkdownWriter(
 
     private string BuildAtomPath(MemoryItem item)
     {
+        return StoragePathResolver.CombineKnowledgePath(_settings, BuildAtomRelativePath(item));
+    }
+
+    private static string BuildAtomRelativePath(MemoryItem item)
+    {
         var date = item.CreatedAt.ToUniversalTime().ToString("yyyyMMdd", CultureInfo.InvariantCulture);
         var fileName = $"{date}-{Slugify(item.Title)}-{item.Id.ToString("N", CultureInfo.InvariantCulture)[..8]}.md";
-        return StoragePathResolver.CombineKnowledgePath(_settings, Path.Combine("2-atoms", item.Category.ToString(), fileName));
+        return Path.Combine("2-atoms", item.Category.ToString(), fileName);
     }
 
     private static string BuildAtomMarkdown(MemoryItem item)
@@ -122,6 +147,77 @@ updated_utc: {{item.UpdatedAt.ToUniversalTime():O}}
 
 {{item.Content}}
 """;
+    }
+
+    private static string BuildMemoryDashboardMarkdown(IReadOnlyList<MemoryItem> items)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("---");
+        builder.AppendLine($"generated_utc: {DateTimeOffset.UtcNow:O}");
+        builder.AppendLine($"item_count: {items.Count.ToString(CultureInfo.InvariantCulture)}");
+        builder.AppendLine("---");
+        builder.AppendLine();
+        builder.AppendLine("# Mira Memory Dashboard");
+        builder.AppendLine();
+        builder.AppendLine("Local Obsidian-friendly index of saved Mira memories. Full memory atoms live under `2-atoms/`.");
+        builder.AppendLine();
+        if (items.Count == 0)
+        {
+            builder.AppendLine("No saved memories yet.");
+            return builder.ToString();
+        }
+
+        builder.AppendLine("## Categories");
+        foreach (var group in items.GroupBy(item => item.Category).OrderBy(group => group.Key.ToString()))
+        {
+            builder.AppendLine($"- {group.Key}: {group.Count().ToString(CultureInfo.InvariantCulture)}");
+        }
+
+        foreach (var group in items.GroupBy(item => item.Category).OrderBy(group => group.Key.ToString()))
+        {
+            builder.AppendLine();
+            builder.AppendLine($"## {group.Key}");
+            builder.AppendLine();
+            builder.AppendLine("| Updated | Memory | Subject | Confidence | Content |");
+            builder.AppendLine("|---|---|---|---:|---|");
+
+            foreach (var item in group.OrderByDescending(item => item.UpdatedAt))
+            {
+                var relativePath = NormalizeMarkdownPath(Path.Combine("..", BuildAtomRelativePath(item)));
+                builder.Append("| ")
+                    .Append(item.UpdatedAt.ToUniversalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+                    .Append(" | [")
+                    .Append(EscapeMarkdownTable(item.Title))
+                    .Append("](")
+                    .Append(relativePath)
+                    .Append(") | ")
+                    .Append(EscapeMarkdownTable(item.Subject ?? string.Empty))
+                    .Append(" | ")
+                    .Append(item.Confidence.ToString("0.00", CultureInfo.InvariantCulture))
+                    .Append(" | ")
+                    .Append(EscapeMarkdownTable(TruncateForDashboard(item.Content, 180)))
+                    .AppendLine(" |");
+            }
+        }
+
+        return builder.ToString();
+    }
+
+    private static string NormalizeMarkdownPath(string path) => path.Replace('\\', '/');
+
+    private static string EscapeMarkdownTable(string value)
+    {
+        return value
+            .Replace("\r", " ", StringComparison.Ordinal)
+            .Replace("\n", " ", StringComparison.Ordinal)
+            .Replace("|", "\\|", StringComparison.Ordinal)
+            .Trim();
+    }
+
+    private static string TruncateForDashboard(string value, int maxLength)
+    {
+        var normalized = value.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
+        return normalized.Length <= maxLength ? normalized : normalized[..maxLength] + "…";
     }
 
     private static string SafeFileName(string value)

@@ -120,6 +120,8 @@ public sealed class KnowledgeMaintenanceServiceTests
 
         public Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default) => Task.CompletedTask;
 
+        public Task<IReadOnlyList<ConversationMessage>> GetRecentConversationAsync(long chatId, int limit, DateTimeOffset beforeUtc, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<ConversationMessage>>([]);
+
         public Task<string> SaveRawCaptureAsync(string content, DateTimeOffset createdAtUtc, CancellationToken cancellationToken = default)
         {
             RawCaptures.Add(content);

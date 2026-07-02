@@ -240,6 +240,43 @@ public sealed class ProcessMessageUseCaseTests
         Assert.Contains("Old laptop preference", stale.Text);
     }
 
+    [Fact]
+    public async Task AnswerIntent_includes_recent_dialogue_for_follow_up_context()
+    {
+        var previousUserMessage = new ConversationMessage(
+            123,
+            400,
+            ConversationDirection.Incoming,
+            "Write a birthday message for Maxim.",
+            new DateTimeOffset(2026, 7, 1, 5, 58, 0, TimeSpan.Zero));
+        var previousReply = new ConversationMessage(
+            123,
+            0,
+            ConversationDirection.Outgoing,
+            "Happy birthday draft for Maxim.",
+            new DateTimeOffset(2026, 7, 1, 5, 59, 0, TimeSpan.Zero));
+        var llm = new FakeLlmProvider("{\"Intent\":\"answer\"}", "Shorter birthday draft.");
+        var memory = new FakeMemoryStore
+        {
+            ConversationHandler = (chatId, limit, beforeUtc) =>
+            {
+                Assert.Equal(123, chatId);
+                Assert.Equal(12, limit);
+                Assert.Equal(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero), beforeUtc);
+                return [previousUserMessage, previousReply];
+            }
+        };
+        var useCase = CreateUseCase(llm, memory);
+
+        var reply = await useCase.HandleAsync(Message("make it shorter"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Shorter birthday draft.", reply.Text);
+        var answerRequest = llm.Requests[1];
+        Assert.Contains("Recent dialogue before current message:", answerRequest.Messages[0].Content);
+        Assert.Contains("Write a birthday message for Maxim.", answerRequest.Messages[0].Content);
+        Assert.Contains("Happy birthday draft for Maxim.", answerRequest.Messages[0].Content);
+    }
+
 
 
     [Fact]
@@ -421,7 +458,7 @@ public sealed class ProcessMessageUseCaseTests
             automationRunner ?? new FakeAutomationRunner(),
             new FakeArtifactWriter(),
             clock ?? new FakeClock(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero)),
-            new AssistantRuntimeSettings(timeZone ?? TimeZoneInfo.Utc, 8, 3500, MedicalBoundary));
+            new AssistantRuntimeSettings(timeZone ?? TimeZoneInfo.Utc, 8, 3500, MedicalBoundary, "%LOCALAPPDATA%/Mira/knowledge/0-dashboard/memory.md"));
     }
 
     private static IncomingMessage Message(string text) => new(123, 456, text, new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero));
@@ -463,9 +500,13 @@ public sealed class ProcessMessageUseCaseTests
         public Func<string, int, IReadOnlyList<MemoryItem>> GetBySubjectHandler { get; init; } = (_, _) => [];
         public Func<double, int, IReadOnlyList<MemoryItem>> GetLowConfidenceHandler { get; init; } = (_, _) => [];
         public Func<DateTimeOffset, int, IReadOnlyList<MemoryItem>> GetStaleHandler { get; init; } = (_, _) => [];
+        public Func<long, int, DateTimeOffset, IReadOnlyList<ConversationMessage>> ConversationHandler { get; init; } = (_, _, _) => [];
+
 
 
         public Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task<IReadOnlyList<ConversationMessage>> GetRecentConversationAsync(long chatId, int limit, DateTimeOffset beforeUtc, CancellationToken cancellationToken = default) => Task.FromResult(ConversationHandler(chatId, limit, beforeUtc));
+
 
         public Task<string> SaveRawCaptureAsync(string content, DateTimeOffset createdAtUtc, CancellationToken cancellationToken = default)
         {

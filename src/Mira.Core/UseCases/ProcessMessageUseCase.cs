@@ -48,6 +48,7 @@ public sealed class ProcessMessageUseCase(
         {
             return await ReplyAsync(message, "Send text for now. Voice and file ingestion are not enabled yet.", cancellationToken).ConfigureAwait(false);
         }
+        var receivedAtUtc = ToUtc(message.ReceivedAt);
 
         await memoryStore.SaveConversationMessageAsync(
             new ConversationMessage(
@@ -55,7 +56,7 @@ public sealed class ProcessMessageUseCase(
                 message.MessageId,
                 ConversationDirection.Incoming,
                 text,
-                ToUtc(message.ReceivedAt)),
+                receivedAtUtc),
             cancellationToken).ConfigureAwait(false);
 
         var commandReply = await TryHandleCommandAsync(message, text, cancellationToken).ConfigureAwait(false);
@@ -64,11 +65,11 @@ public sealed class ProcessMessageUseCase(
             return commandReply;
         }
 
-        var action = await ClassifyAsync(text, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
+        var action = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
         string replyText;
         if (action is null || !IsKnownIntent(action.Intent))
         {
-            var answer = await AnswerWithContextAsync(text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
+            var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
             replyText = answer;
         }
         else
@@ -99,7 +100,7 @@ public sealed class ProcessMessageUseCase(
             }
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
-            var action = await ClassifyAsync(captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
+            var action = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
             var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, action, cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
@@ -228,10 +229,11 @@ public sealed class ProcessMessageUseCase(
 
     private async Task<string> HandleActionAsync(IncomingMessage message, string text, AssistantAction action, CancellationToken cancellationToken)
     {
+        var receivedAtUtc = ToUtc(message.ReceivedAt);
         return NormalizeIntent(action.Intent) switch
         {
             "save_memory" => await SaveMemoryIntentAsync(message.MessageId, text, action, cancellationToken).ConfigureAwait(false),
-            "answer" or "chat" => await AnswerWithContextAsync(text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
+            "answer" or "chat" => await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
             "create_reminder" => await CreateReminderAsync(action, cancellationToken).ConfigureAwait(false),
             "list_reminders" => FormatReminders(await reminderStore.GetPendingAsync(20, cancellationToken).ConfigureAwait(false)),
             "complete_reminder" => await CompleteReminderAsync(text, cancellationToken).ConfigureAwait(false),
@@ -242,13 +244,14 @@ public sealed class ProcessMessageUseCase(
             "clarify" => string.IsNullOrWhiteSpace(action.Question)
                 ? "What should I do with this: save it, remind you, or answer a question?"
                 : action.Question.Trim(),
-            _ => await AnswerWithContextAsync(text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false)
+            _ => await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false)
         };
     }
 
-    private async Task<AssistantAction?> ClassifyAsync(string text, bool forceSaveMemory, CancellationToken cancellationToken)
+    private async Task<AssistantAction?> ClassifyAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool forceSaveMemory, CancellationToken cancellationToken)
     {
-        var prompt = BuildClassificationPrompt(forceSaveMemory);
+        var recentDialogue = await GetRecentDialogueAsync(chatId, receivedAtUtc, cancellationToken).ConfigureAwait(false);
+        var prompt = BuildClassificationPrompt(forceSaveMemory, FormatConversationContext(recentDialogue));
         var request = new LlmRequest(
             [new LlmMessage(LlmRole.System, prompt), new LlmMessage(LlmRole.User, text)],
             Temperature: 0.1,
@@ -266,13 +269,13 @@ public sealed class ProcessMessageUseCase(
         }
     }
 
-    private string BuildClassificationPrompt(bool forceSaveMemory)
+    private string BuildClassificationPrompt(bool forceSaveMemory, string recentDialogue)
     {
         var localNow = TimeZoneInfo.ConvertTime(clock.UtcNow, settings.TimeZone);
         var categories = string.Join(", ", Enum.GetNames<MemoryCategory>());
         var forceInstruction = forceSaveMemory
             ? "The user explicitly asked to capture this. Prefer intent save_memory and extract durable facts."
-            : "Choose the safest intent. If the message is ambiguous, use clarify.";
+            : "Choose the safest intent. If the message is ambiguous, use recent dialogue to resolve follow-up references; otherwise use clarify.";
 
         return $$"""
 You classify one private local-assistant message into exactly one action.
@@ -283,7 +286,10 @@ Intent must be exactly one of: save_memory, answer, create_reminder, list_remind
 Use save_memory for durable facts about people/friends/health/medical/job/hobby/gear/thought/decision/daily notes.
 Use create_reminder only when a concrete local due date/time can be inferred.
 Use run_automation only when the user names an allowlisted local task and provides required arguments.
+Use recent dialogue only for conversation continuity, pronoun resolution, and short follow-up replies; do not invent durable facts from dialogue.
 For medical or medicine content, classify facts as Medical when they concern medication, diagnosis, dosage, clinician instructions, or treatment.
+Recent dialogue before current message:
+{{recentDialogue}}
 Return JSON only. Do not include markdown.
 JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question.
 """;
@@ -355,8 +361,10 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
         return string.IsNullOrEmpty(relatedLine) ? $"Saved: {saved.Title}" : $"Saved: {saved.Title}\nRelated: {relatedLine}";
     }
 
-    private async Task<string> AnswerWithContextAsync(string text, bool appendStructuringFailure, CancellationToken cancellationToken)
+    private async Task<string> AnswerWithContextAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool appendStructuringFailure, CancellationToken cancellationToken)
     {
+        var recentDialogue = await GetRecentDialogueAsync(chatId, receivedAtUtc, cancellationToken).ConfigureAwait(false);
+        var dialogueContext = FormatConversationContext(recentDialogue);
         var memories = await memoryStore.SearchAsync(
             new MemorySearchQuery(text, [], settings.MaxContextMemories),
             cancellationToken).ConfigureAwait(false);
@@ -364,18 +372,21 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
         string answer;
         if (memories.Count == 0)
         {
-            answer = await AnswerWithoutPersonalContextAsync(text, cancellationToken).ConfigureAwait(false);
+            answer = await AnswerWithoutPersonalContextAsync(text, dialogueContext, cancellationToken).ConfigureAwait(false);
         }
         else
         {
             var context = FormatMemoryContext(memories);
             var system = $$"""
 You are Mira, a private local-first assistant.
-Answer using only the retrieved personal context and the current user message.
-If the context does not support a claim, say so briefly.
+Use retrieved personal context for durable facts, recent dialogue for conversation continuity, and the current user message for the immediate request.
+If the retrieved personal context does not support a durable personal claim, say so briefly.
 For medical or medicine content, do not recommend changing dose, stopping medicine, ignoring a clinician, or making treatment decisions.
 Retrieved personal context:
 {{context}}
+
+Recent dialogue before current message:
+{{dialogueContext}}
 """;
             var response = await llmProvider.CompleteAsync(
                 new LlmRequest([new LlmMessage(LlmRole.System, system), new LlmMessage(LlmRole.User, text)], Temperature: 0.2),
@@ -395,15 +406,18 @@ Retrieved personal context:
         return answer;
     }
 
-    private async Task<string> AnswerWithoutPersonalContextAsync(string text, CancellationToken cancellationToken)
+    private async Task<string> AnswerWithoutPersonalContextAsync(string text, string dialogueContext, CancellationToken cancellationToken)
     {
-        var system = """
+        var system = $$"""
 You are Mira, a private local-first assistant running on the user's PC.
 No saved personal context matched this message.
-If the user asks for personal facts, preferences, memories, relationships, health history, reminders, or decisions, say you do not know yet and ask what should be saved.
+Use recent dialogue to keep the conversation coherent, especially for short follow-ups like "yes", "what about that", or "write it again".
+If the user asks for personal facts, preferences, memories, relationships, health history, reminders, or decisions that are not in recent dialogue, say you do not know yet and ask what should be saved.
 If the user asks a general question, wants brainstorming, or needs help drafting text, answer normally using local model knowledge.
 Do not pretend that unsaved personal facts are known.
 For medical or medicine content, do not recommend changing dose, stopping medicine, ignoring a clinician, or making treatment decisions.
+Recent dialogue before current message:
+{{dialogueContext}}
 """;
         var response = await llmProvider.CompleteAsync(
             new LlmRequest([new LlmMessage(LlmRole.System, system), new LlmMessage(LlmRole.User, text)], Temperature: 0.2),
@@ -755,6 +769,27 @@ Health context:
         return TimeZoneInfo.ConvertTime(utc, settings.TimeZone).ToString("yyyy-MM-dd HH:mm zzz", CultureInfo.InvariantCulture);
     }
 
+    private Task<IReadOnlyList<ConversationMessage>> GetRecentDialogueAsync(long chatId, DateTimeOffset receivedAtUtc, CancellationToken cancellationToken)
+    {
+        return memoryStore.GetRecentConversationAsync(chatId, 12, receivedAtUtc, cancellationToken);
+    }
+
+    private static string FormatConversationContext(IReadOnlyList<ConversationMessage> messages)
+    {
+        if (messages.Count == 0)
+        {
+            return "(none)";
+        }
+
+        var lines = messages.Select(message =>
+        {
+            var role = message.Direction == ConversationDirection.Incoming ? "user" : "mira";
+            var content = FirstCharacters(message.Content.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal), 500);
+            return $"- {message.CreatedAt:O} {role}: {content}";
+        });
+        return string.Join("\n", lines);
+    }
+
     private static DateTimeOffset ToUtc(DateTimeOffset value) => value.ToUniversalTime();
 
     private string MenuText()
@@ -834,6 +869,7 @@ Time zone: {settings.TimeZone.Id}
 Max context memories: {settings.MaxContextMemories}
 Max reply characters: {settings.MaxReplyCharacters}
 Medical safety boundary: enabled
+Memory dashboard: {settings.KnowledgeDashboardPath}
 
 Secrets are loaded from configuration/environment and are never shown here.
 """;

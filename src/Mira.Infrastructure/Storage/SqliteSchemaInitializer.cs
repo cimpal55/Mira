@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     created_utc TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_conversation_messages_chat_created
+ON conversation_messages (chat_id, created_utc DESC, id DESC);
+
 CREATE TABLE IF NOT EXISTS raw_captures (
     id TEXT PRIMARY KEY,
     source_path TEXT NOT NULL UNIQUE,

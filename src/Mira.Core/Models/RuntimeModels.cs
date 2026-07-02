@@ -4,4 +4,5 @@ public sealed record AssistantRuntimeSettings(
     TimeZoneInfo TimeZone,
     int MaxContextMemories,
     int MaxReplyCharacters,
-    string MedicalBoundaryMessage);
+    string MedicalBoundaryMessage,
+    string KnowledgeDashboardPath);
