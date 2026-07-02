@@ -109,6 +109,29 @@ public sealed class ProcessMessageUseCase(
             return await ReplyAsync(message, await GenerateTodayDashboardAsync(cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         }
 
+        if (TryGetCommandArgument(text, "/note", out var noteText))
+        {
+            return await ReplyAsync(message, await SaveDailyNoteAsync(message.MessageId, noteText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (TryGetCommandArgument(text, "/profile", out var profileName))
+        {
+            return await ReplyAsync(message, await GeneratePersonProfileAsync(profileName, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/uncertain"))
+        {
+            var lowConfidence = await memoryStore.GetLowConfidenceAsync(0.6, 20, cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatMemories("Low-confidence memories", lowConfidence), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/stale"))
+        {
+            var stale = await memoryStore.GetStaleAsync(clock.UtcNow.AddDays(-90), 20, cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, FormatMemories("Stale memories", stale), cancellationToken).ConfigureAwait(false);
+        }
+
+
 
         if (IsCommand(text, "/brief"))
         {
@@ -402,6 +425,67 @@ For medical or medicine content, do not recommend changing dose, stopping medici
 
         return $"Today ({localNow:yyyy-MM-dd})\n\n{remindersSection}\n\n{memoriesSection}";
     }
+
+    private async Task<string> SaveDailyNoteAsync(long sourceMessageId, string noteText, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(noteText))
+        {
+            return "Usage: /note <text>";
+        }
+
+        var sourcePath = await memoryStore.SaveRawCaptureAsync(noteText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        var title = FirstCharacters(noteText, 80);
+        var saved = await memoryStore.UpsertAsync(
+            new MemoryUpsert(
+                MemoryCategory.DailyNote,
+                title,
+                noteText.Trim(),
+                null,
+                ["daily-note"],
+                1.0,
+                sourceMessageId,
+                sourcePath),
+            cancellationToken).ConfigureAwait(false);
+        return $"Daily note saved: {saved.Title}";
+    }
+
+    private async Task<string> GeneratePersonProfileAsync(string name, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "Usage: /profile <person-name>";
+        }
+
+        var subject = name.Trim();
+        var bySubject = await memoryStore.GetBySubjectAsync(subject, 20, cancellationToken).ConfigureAwait(false);
+        var bySearch = await memoryStore.SearchAsync(new MemorySearchQuery(subject, [MemoryCategory.Person], 20), cancellationToken).ConfigureAwait(false);
+        var memories = bySubject
+            .Concat(bySearch)
+            .DistinctBy(memory => memory.Id)
+            .Take(20)
+            .ToArray();
+        if (memories.Length == 0)
+        {
+            return $"No saved person memories matched \"{FirstCharacters(subject, 60)}\". Save one with /remember Person: {subject}.";
+        }
+
+        var prompt = $$"""
+Create a concise person profile using only these saved local memories.
+Sections: relationship, known facts, preferences, gift ideas, open questions.
+If a section is unsupported, say "not saved yet".
+Do not invent facts.
+
+Person: {{subject}}
+Memories:
+{{FormatMemoryContext(memories)}}
+""";
+        var response = await llmProvider.CompleteAsync(
+            new LlmRequest([new LlmMessage(LlmRole.System, prompt), new LlmMessage(LlmRole.User, $"Create a profile for {subject}.")], Temperature: 0.2),
+            cancellationToken).ConfigureAwait(false);
+        var profile = response.Content.Trim();
+        return UsesMedicalContext(subject, memories) ? EnsureMedicalBoundary(profile) : profile;
+    }
+
 
 
     private async Task<string> CreateReminderAsync(AssistantAction action, CancellationToken cancellationToken)
@@ -773,8 +857,12 @@ Mira local assistant commands:
 /start or /help — show this list
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory
+/note <text> — save a deterministic daily note
 /search <text> — search saved memories
 /today — show today's reminders and new memories
+/profile <name> — summarize saved memories about a person
+/uncertain — list low-confidence memories to review
+/stale — list memories older than 90 days
 /brief — generate today's local daily brief
 /review — generate this week's review
 /people — list saved people

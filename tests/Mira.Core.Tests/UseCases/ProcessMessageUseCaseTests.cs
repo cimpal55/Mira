@@ -93,6 +93,81 @@ public sealed class ProcessMessageUseCaseTests
         Assert.DoesNotContain("Tomorrow task", reply.Text);
     }
 
+    [Fact]
+    public async Task NoteCommand_saves_daily_note_without_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory);
+
+        var reply = await useCase.HandleAsync(Message("/note hit a PR on bench press today"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Daily note saved:", reply.Text);
+        Assert.Single(memory.RawCaptures);
+        var saved = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.DailyNote, saved.Category);
+        Assert.Contains("daily-note", saved.Tags);
+        Assert.NotNull(saved.SourcePath);
+        Assert.Empty(llm.Requests);
+    }
+
+    [Fact]
+    public async Task ProfileCommand_summarizes_subject_and_person_memories()
+    {
+        var llm = new FakeLlmProvider("Profile for Maxim.");
+        var memory = new FakeMemoryStore
+        {
+            GetBySubjectHandler = (subject, limit) =>
+            {
+                Assert.Equal("Maxim", subject);
+                Assert.Equal(20, limit);
+                return [Memory("Maxim coffee", "Maxim likes dark roast coffee", MemoryCategory.Person)];
+            },
+            SearchHandler = query =>
+            {
+                Assert.Equal("Maxim", query.Text);
+                Assert.Contains(MemoryCategory.Person, query.Categories);
+                return [Memory("Maxim keyboards", "Maxim likes tactile keyboard switches", MemoryCategory.Person)];
+            }
+        };
+        var useCase = CreateUseCase(llm, memory);
+
+        var reply = await useCase.HandleAsync(Message("/profile Maxim"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Profile for Maxim.", reply.Text);
+        var request = Assert.Single(llm.Requests);
+        Assert.Contains("Maxim likes dark roast coffee", request.Messages[0].Content);
+        Assert.Contains("Maxim likes tactile keyboard switches", request.Messages[0].Content);
+    }
+
+    [Fact]
+    public async Task MemoryReviewCommands_list_low_confidence_and_stale_memories()
+    {
+        var memory = new FakeMemoryStore
+        {
+            GetLowConfidenceHandler = (maxConfidence, limit) =>
+            {
+                Assert.Equal(0.6, maxConfidence);
+                Assert.Equal(20, limit);
+                return [Memory("Maybe Maxim", "May prefer tactile switches", MemoryCategory.Person)];
+            },
+            GetStaleHandler = (olderThanUtc, limit) =>
+            {
+                Assert.Equal(new DateTimeOffset(2026, 4, 2, 6, 0, 0, TimeSpan.Zero), olderThanUtc);
+                Assert.Equal(20, limit);
+                return [Memory("Old gear", "Old laptop preference", MemoryCategory.Gear)];
+            }
+        };
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory);
+
+        var uncertain = await useCase.HandleAsync(Message("/uncertain"), TestContext.Current.CancellationToken);
+        var stale = await useCase.HandleAsync(Message("/stale"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("May prefer tactile switches", uncertain.Text);
+        Assert.Contains("Old laptop preference", stale.Text);
+    }
+
+
 
     [Fact]
     public async Task SaveMemoryIntent_returns_related_existing_memories()
@@ -312,6 +387,9 @@ public sealed class ProcessMessageUseCaseTests
         public Func<MemorySearchQuery, IReadOnlyList<MemoryItem>> SearchHandler { get; init; } = _ => [];
         public Func<MemoryCategory, int, IReadOnlyList<MemoryItem>> GetByCategoryHandler { get; init; } = (_, _) => [];
         public Func<int, DateTimeOffset?, IReadOnlyList<MemoryItem>> GetRecentHandler { get; init; } = (_, _) => [];
+        public Func<string, int, IReadOnlyList<MemoryItem>> GetBySubjectHandler { get; init; } = (_, _) => [];
+        public Func<double, int, IReadOnlyList<MemoryItem>> GetLowConfidenceHandler { get; init; } = (_, _) => [];
+        public Func<DateTimeOffset, int, IReadOnlyList<MemoryItem>> GetStaleHandler { get; init; } = (_, _) => [];
 
 
         public Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default) => Task.CompletedTask;
@@ -334,11 +412,11 @@ public sealed class ProcessMessageUseCaseTests
 
         public Task<IReadOnlyList<MemoryItem>> GetByCategoryAsync(MemoryCategory category, int limit, CancellationToken cancellationToken = default) => Task.FromResult(GetByCategoryHandler(category, limit));
 
-        public Task<IReadOnlyList<MemoryItem>> GetBySubjectAsync(string subject, int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<MemoryItem>>([]);
+        public Task<IReadOnlyList<MemoryItem>> GetBySubjectAsync(string subject, int limit, CancellationToken cancellationToken = default) => Task.FromResult(GetBySubjectHandler(subject, limit));
 
-        public Task<IReadOnlyList<MemoryItem>> GetLowConfidenceAsync(double maxConfidence, int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<MemoryItem>>([]);
+        public Task<IReadOnlyList<MemoryItem>> GetLowConfidenceAsync(double maxConfidence, int limit, CancellationToken cancellationToken = default) => Task.FromResult(GetLowConfidenceHandler(maxConfidence, limit));
 
-        public Task<IReadOnlyList<MemoryItem>> GetStaleAsync(DateTimeOffset olderThanUtc, int limit, CancellationToken cancellationToken = default) => Task.FromResult<IReadOnlyList<MemoryItem>>([]);
+        public Task<IReadOnlyList<MemoryItem>> GetStaleAsync(DateTimeOffset olderThanUtc, int limit, CancellationToken cancellationToken = default) => Task.FromResult(GetStaleHandler(olderThanUtc, limit));
 
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }

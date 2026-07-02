@@ -149,14 +149,44 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
 
     private async Task SendChunksAsync(long chatId, string text, CancellationToken cancellationToken, InlineKeyboardMarkup? replyMarkup = null)
     {
-        var value = string.IsNullOrWhiteSpace(text) ? "Done." : text;
-        for (var index = 0; index < value.Length; index += TelegramChunkSize)
+        var chunks = SplitTelegramChunks(string.IsNullOrWhiteSpace(text) ? "Done." : text);
+        for (var index = 0; index < chunks.Count; index++)
         {
-            var length = Math.Min(TelegramChunkSize, value.Length - index);
-            var chunk = value.Substring(index, length);
             var chunkReplyMarkup = index == 0 ? replyMarkup : null;
-            await _botClient.SendMessage(chatId, chunk, replyMarkup: chunkReplyMarkup, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await _botClient.SendMessage(chatId, chunks[index], replyMarkup: chunkReplyMarkup, cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private static IReadOnlyList<string> SplitTelegramChunks(string value)
+    {
+        if (value.Length <= TelegramChunkSize)
+        {
+            return [value];
+        }
+
+        var chunks = new List<string>();
+        var index = 0;
+        while (index < value.Length)
+        {
+            var remaining = value.Length - index;
+            if (remaining <= TelegramChunkSize)
+            {
+                chunks.Add(value[index..]);
+                break;
+            }
+
+            var length = TelegramChunkSize;
+            var newlineIndex = value.LastIndexOf('\n', index + TelegramChunkSize - 1, TelegramChunkSize);
+            if (newlineIndex > index)
+            {
+                length = newlineIndex - index + 1;
+            }
+
+            chunks.Add(value.Substring(index, length));
+            index += length;
+        }
+
+        return chunks;
     }
 
     private static InlineKeyboardMarkup? BuildReplyMarkup(string text)
@@ -187,8 +217,12 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         [
             new BotCommand { Command = "capture", Description = "Save text and extract memory" },
             new BotCommand { Command = "remember", Description = "Save text and extract memory" },
+            new BotCommand { Command = "note", Description = "Save a daily note" },
             new BotCommand { Command = "search", Description = "Search saved memories" },
             new BotCommand { Command = "today", Description = "Show today's dashboard" },
+            new BotCommand { Command = "profile", Description = "Summarize a person" },
+            new BotCommand { Command = "uncertain", Description = "Review low-confidence memories" },
+            new BotCommand { Command = "stale", Description = "Review stale memories" },
             new BotCommand { Command = "brief", Description = "Generate daily brief" },
             new BotCommand { Command = "review", Description = "Generate weekly review" },
             new BotCommand { Command = "reminders", Description = "List pending reminders" },
