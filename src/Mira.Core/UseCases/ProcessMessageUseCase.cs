@@ -26,6 +26,9 @@ public sealed class ProcessMessageUseCase(
         }
     };
 
+    private const int DocumentClassificationSnippetCharacters = 6_000;
+    private const int DocumentFallbackExcerptCharacters = 1_200;
+
     private static readonly string[] KnownIntents =
     [
         "save_memory",
@@ -80,6 +83,42 @@ public sealed class ProcessMessageUseCase(
         return await ReplyAsync(message, replyText, cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task<AssistantReply> ImportDocumentTextAsync(IncomingMessage message, string documentName, string content, CancellationToken cancellationToken = default)
+    {
+        var name = SafeDocumentName(documentName);
+        var documentText = content;
+        if (string.IsNullOrWhiteSpace(documentText))
+        {
+            return await ReplyAsync(message, $"Document \"{name}\" did not contain extractable text.", cancellationToken).ConfigureAwait(false);
+        }
+
+        var receivedAtUtc = ToUtc(message.ReceivedAt);
+        await memoryStore.SaveConversationMessageAsync(
+            new ConversationMessage(
+                message.ChatId,
+                message.MessageId,
+                ConversationDirection.Incoming,
+                $"[document import] {name}",
+                receivedAtUtc),
+            cancellationToken).ConfigureAwait(false);
+
+        var sourcePath = await memoryStore.SaveRawCaptureAsync(documentText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        var classificationText = BuildDocumentClassificationText(name, documentText);
+        var action = await ClassifyAsync(message.ChatId, receivedAtUtc, classificationText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
+        var fallbackContent = BuildDocumentFallbackMemoryContent(name, sourcePath, documentText);
+        var saved = await SaveCapturedMemoryAsync($"Imported document: {name}", fallbackContent, sourcePath, message.MessageId, action, cancellationToken).ConfigureAwait(false);
+
+        return await ReplyAsync(
+            message,
+            $"""
+            Imported document: {name}
+            Raw capture: {sourcePath}
+            Saved memory: {saved.Title}
+            Local dashboard: {settings.KnowledgeDashboardHtmlPath}
+            """,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<AssistantReply?> TryHandleCommandAsync(IncomingMessage message, string text, CancellationToken cancellationToken)
     {
         if (IsCommand(text, "/start") || IsCommand(text, "/menu"))
@@ -101,7 +140,7 @@ public sealed class ProcessMessageUseCase(
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
             var action = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
-            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, action, cancellationToken).ConfigureAwait(false);
+            var saved = await SaveCapturedMemoryAsync(captureText, captureText, sourcePath, message.MessageId, action, cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
 
@@ -307,7 +346,8 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
     }
 
     private async Task<MemoryItem> SaveCapturedMemoryAsync(
-        string rawText,
+        string fallbackTitleText,
+        string fallbackContent,
         string sourcePath,
         long sourceMessageId,
         AssistantAction? action,
@@ -331,12 +371,12 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
                 cancellationToken).ConfigureAwait(false);
         }
 
-        var title = FirstCharacters(rawText, 80);
+        var title = FirstCharacters(fallbackTitleText, 80);
         return await memoryStore.UpsertAsync(
             new MemoryUpsert(
                 MemoryCategory.General,
                 title,
-                rawText,
+                fallbackContent.Trim(),
                 null,
                 [],
                 0.4,
@@ -1025,6 +1065,34 @@ Commands:
     {
         var trimmed = value.Trim();
         return trimmed.Length <= maxLength ? trimmed : trimmed[..maxLength];
+    }
+
+    private static string BuildDocumentClassificationText(string documentName, string content)
+    {
+        var snippet = FirstCharacters(content, DocumentClassificationSnippetCharacters);
+        return $"""
+        Imported local document: {documentName}
+        Only this bounded excerpt is being sent for classification; the full extracted text is stored only as a local raw capture.
+
+        Excerpt:
+        {snippet}
+        """;
+    }
+
+    private static string BuildDocumentFallbackMemoryContent(string documentName, string sourcePath, string content)
+    {
+        var excerpt = FirstCharacters(content, DocumentFallbackExcerptCharacters);
+        return $"""
+        Imported document "{documentName}" into Mira memory.
+        Full extracted text is stored only in the local raw capture: {sourcePath}
+        Bounded excerpt:
+        {excerpt}
+        """;
+    }
+
+    private static string SafeDocumentName(string documentName)
+    {
+        return string.IsNullOrWhiteSpace(documentName) ? "document" : Path.GetFileName(documentName.Trim());
     }
 
     private static bool IsKnownIntent(string intent) => KnownIntents.Contains(NormalizeIntent(intent), StringComparer.Ordinal);

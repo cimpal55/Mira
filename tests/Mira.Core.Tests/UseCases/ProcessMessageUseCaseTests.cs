@@ -41,6 +41,77 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task ImportDocumentText_saves_full_raw_capture_but_classifies_bounded_snippet()
+    {
+        const string lateDocumentMarker = "TAIL_MARKER_must_stay_out_of_classifier_context";
+        var longDocumentText = string.Concat(
+            "Maxim uses a Moonlander keyboard for travel.\n",
+            new string('x', 12_000),
+            "\n",
+            lateDocumentMarker);
+        var llm = new FakeLlmProvider("""
+            {"Intent":"save_memory","Category":"Gear","Title":"Maxim travel keyboard","Content":"Maxim uses a Moonlander keyboard for travel.","Subject":"Maxim","Tags":["document","gear"],"Confidence":0.91}
+            """);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory);
+
+        var reply = await useCase.ImportDocumentTextAsync(
+            Message("[document: keyboard-notes.pdf]"),
+            "keyboard-notes.pdf",
+            longDocumentText,
+            TestContext.Current.CancellationToken);
+
+        var rawCapture = Assert.Single(memory.RawCaptures);
+        Assert.Contains(lateDocumentMarker, rawCapture);
+        var saved = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Gear, saved.Category);
+        Assert.Equal("Maxim travel keyboard", saved.Title);
+        Assert.Equal("Maxim uses a Moonlander keyboard for travel.", saved.Content);
+        Assert.Equal("Maxim", saved.Subject);
+        Assert.Contains("document", saved.Tags);
+        Assert.Equal(456, saved.SourceMessageId);
+        Assert.Equal("0-raw/2026/07/raw.md", saved.SourcePath);
+
+        var conversation = Assert.Single(memory.ConversationMessages.FindAll(message => message.Direction == ConversationDirection.Incoming));
+        Assert.Equal(ConversationDirection.Incoming, conversation.Direction);
+        Assert.Contains("keyboard-notes.pdf", conversation.Content);
+        Assert.DoesNotContain(lateDocumentMarker, conversation.Content);
+
+        var request = Assert.Single(llm.Requests);
+        Assert.Contains("explicitly asked to capture", request.Messages[0].Content, StringComparison.OrdinalIgnoreCase);
+        var classifierText = request.Messages.Single(message => message.Role == LlmRole.User).Content;
+        Assert.Contains("Maxim uses a Moonlander keyboard", classifierText);
+        Assert.DoesNotContain(lateDocumentMarker, classifierText);
+        Assert.True(classifierText.Length < longDocumentText.Length);
+
+        Assert.Contains("keyboard-notes.pdf", reply.Text);
+        Assert.Contains("0-raw/2026/07/raw.md", reply.Text);
+        Assert.Contains("Maxim travel keyboard", reply.Text);
+        Assert.Contains("0-dashboard/index.html", reply.Text);
+    }
+
+    [Fact]
+    public async Task ImportDocumentText_rejects_empty_document_without_saving_or_calling_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory);
+
+        var reply = await useCase.ImportDocumentTextAsync(
+            Message("[document: empty.md]"),
+            "empty.md",
+            " \r\n\t ",
+            TestContext.Current.CancellationToken);
+
+        Assert.Contains("empty", reply.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("empty.md", reply.Text);
+        Assert.DoesNotContain(memory.ConversationMessages, message => message.Direction == ConversationDirection.Incoming);
+        Assert.Empty(memory.RawCaptures);
+        Assert.Empty(memory.Upserts);
+        Assert.Empty(llm.Requests);
+    }
+
+    [Fact]
     public async Task SearchCommand_returns_matching_memories_without_llm()
     {
         var llm = new FakeLlmProvider();
@@ -525,9 +596,13 @@ public sealed class ProcessMessageUseCaseTests
         public Func<DateTimeOffset, int, IReadOnlyList<MemoryItem>> GetStaleHandler { get; init; } = (_, _) => [];
         public Func<long, int, DateTimeOffset, IReadOnlyList<ConversationMessage>> ConversationHandler { get; init; } = (_, _, _) => [];
 
+        public List<ConversationMessage> ConversationMessages { get; } = [];
 
-
-        public Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default)
+        {
+            ConversationMessages.Add(message);
+            return Task.CompletedTask;
+        }
         public Task<IReadOnlyList<ConversationMessage>> GetRecentConversationAsync(long chatId, int limit, DateTimeOffset beforeUtc, CancellationToken cancellationToken = default) => Task.FromResult(ConversationHandler(chatId, limit, beforeUtc));
 
 

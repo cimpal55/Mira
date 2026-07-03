@@ -38,15 +38,18 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     private readonly ILogger<TelegramBotService> _logger;
     private readonly TelegramSettings _settings;
     private readonly TelegramBotClient _botClient;
+    private readonly IDocumentTextExtractor _documentTextExtractor;
 
     public TelegramBotService(
         IServiceScopeFactory scopeFactory,
         IOptions<TelegramSettings> options,
-        ILogger<TelegramBotService> logger)
+        ILogger<TelegramBotService> logger,
+        IDocumentTextExtractor documentTextExtractor)
     {
         _scopeFactory = scopeFactory;
         _logger = logger;
         _settings = options.Value;
+        _documentTextExtractor = documentTextExtractor;
         _botClient = new TelegramBotClient(_settings.BotToken);
     }
 
@@ -88,6 +91,12 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             return;
         }
 
+        if (message.Document is not null)
+        {
+            await HandleDocumentMessageAsync(botClient, message, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(message.Text))
         {
             await SendChunksAsync(
@@ -111,6 +120,66 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             await SendChunksAsync(
                 message.Chat.Id,
                 "I hit a local error while processing that. Check the Mira logs on the PC.",
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleDocumentMessageAsync(ITelegramBotClient botClient, Message message, CancellationToken cancellationToken)
+    {
+        var document = message.Document;
+        if (document is null)
+        {
+            return;
+        }
+
+        var fileName = string.IsNullOrWhiteSpace(document.FileName) ? "document" : document.FileName.Trim();
+        if (!_documentTextExtractor.Supports(fileName, document.MimeType))
+        {
+            await SendChunksAsync(
+                message.Chat.Id,
+                $"Unsupported document type for \"{fileName}\". Send a PDF, .txt, or Markdown file.",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            await using var stream = new MemoryStream();
+            var file = await botClient.GetFile(document.FileId, cancellationToken).ConfigureAwait(false);
+            await botClient.DownloadFile(file, stream, cancellationToken).ConfigureAwait(false);
+            stream.Position = 0;
+
+            var extraction = await _documentTextExtractor.ExtractTextAsync(fileName, document.MimeType, stream, cancellationToken).ConfigureAwait(false);
+            if (!extraction.IsSupported)
+            {
+                await SendChunksAsync(
+                    message.Chat.Id,
+                    extraction.FailureMessage ?? $"Unsupported document type for \"{fileName}\". Send a PDF, .txt, or Markdown file.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (!extraction.HasText)
+            {
+                await SendChunksAsync(
+                    message.Chat.Id,
+                    $"Document \"{fileName}\" did not contain extractable text.",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            using var scope = _scopeFactory.CreateScope();
+            var useCase = scope.ServiceProvider.GetRequiredService<ProcessMessageUseCase>();
+            var incoming = new IncomingMessage(message.Chat.Id, message.MessageId, $"[document import] {fileName}", DateTimeOffset.UtcNow);
+            var reply = await useCase.ImportDocumentTextAsync(incoming, fileName, extraction.Text, cancellationToken).ConfigureAwait(false);
+            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Local error while processing Telegram owner document.");
+            await SendChunksAsync(
+                message.Chat.Id,
+                "I hit a local error while importing that document. Check the Mira logs on the PC.",
                 cancellationToken).ConfigureAwait(false);
         }
     }

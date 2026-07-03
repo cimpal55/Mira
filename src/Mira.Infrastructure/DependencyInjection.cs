@@ -9,6 +9,7 @@ using Mira.Core.Interfaces;
 using Mira.Core.Models;
 using Mira.Infrastructure.Automation;
 using Mira.Infrastructure.Configuration;
+using Mira.Infrastructure.Documents;
 using Mira.Infrastructure.Llm;
 using Mira.Infrastructure.Proactive;
 using Mira.Infrastructure.Reminders;
@@ -60,6 +61,8 @@ public static class DependencyInjection
         services.AddSingleton<SqliteSchemaInitializer>();
 
         services.AddSingleton<IAutomationRunner, LocalProcessAutomationRunner>();
+        services.AddSingleton<IDocumentTextExtractor, LocalDocumentTextExtractor>();
+
 
         services.AddSingleton(provider =>
         {
