@@ -84,6 +84,7 @@ public static class PersonalOperatingSystemMap
     public static IReadOnlyList<VaultFolderDefinition> VaultFolders { get; } =
     [
         new("0-raw/", "Immutable raw captures from Telegram and local ingestion.", true),
+        new("0-dashboard/", "Generated local dashboards and Obsidian indexes for live memory visibility.", false),
         new("sources/", "Original external files, links, screenshots, PDFs, and voice notes.", true),
         new("1-desk/", "In-progress triage, drafts, pending reviews, and working notes.", true),
         new("2-atoms/", "Atomic semantic memories grouped by category.", true),

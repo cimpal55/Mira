@@ -80,6 +80,7 @@ public sealed class ProcessMessageUseCaseTests
         Assert.Contains("Cartographer", reply.Text);
         Assert.Contains("Critic", reply.Text);
         Assert.Contains("Editor", reply.Text);
+        Assert.Contains("0-dashboard/", reply.Text);
         Assert.Contains("_system/skills/", reply.Text);
         Assert.Empty(llm.Requests);
     }

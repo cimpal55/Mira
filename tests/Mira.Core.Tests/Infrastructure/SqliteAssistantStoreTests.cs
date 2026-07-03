@@ -97,19 +97,36 @@ public sealed class SqliteAssistantStoreTests
             null,
             sourcePath), TestContext.Current.CancellationToken);
 
-        var dashboardPath = Path.Combine(fixture.KnowledgeRootPath, "0-dashboard", "memory.md");
+        var dashboardDirectory = Path.Combine(fixture.KnowledgeRootPath, "0-dashboard");
+        var dashboardPath = Path.Combine(dashboardDirectory, "memory.md");
+        var htmlDashboardPath = Path.Combine(dashboardDirectory, "memory.html");
+        Assert.True(Directory.Exists(dashboardDirectory));
         Assert.True(File.Exists(dashboardPath));
         var markdown = await File.ReadAllTextAsync(dashboardPath, TestContext.Current.CancellationToken);
         Assert.Contains("# Mira Memory Dashboard", markdown);
+        Assert.Contains("item_count: 1", markdown);
+        Assert.Contains("## At a glance", markdown);
+        Assert.Contains("- Total memories in this dashboard: 1", markdown);
         Assert.Contains("- Person: 1", markdown);
+        Assert.Contains("## Recent memories", markdown);
         Assert.Contains("[Maxim keyboard preferences](../2-atoms/Person/", markdown);
         Assert.Contains("Maxim likes mechanical keyboards", markdown);
+        Assert.True(File.Exists(htmlDashboardPath));
+        var html = await File.ReadAllTextAsync(htmlDashboardPath, TestContext.Current.CancellationToken);
+        Assert.Contains("http-equiv=\"refresh\" content=\"5\"", html);
+        Assert.Contains("Mira Memory Dashboard", html);
+        Assert.Contains("Maxim keyboard preferences", html);
+        Assert.Contains("../2-atoms/Person/", html);
 
         await fixture.Store.DeleteAsync(item.Id, TestContext.Current.CancellationToken);
 
         var updated = await File.ReadAllTextAsync(dashboardPath, TestContext.Current.CancellationToken);
         Assert.DoesNotContain("Maxim keyboard preferences", updated);
+        Assert.Contains("item_count: 0", updated);
         Assert.Contains("No saved memories yet.", updated);
+        var updatedHtml = await File.ReadAllTextAsync(htmlDashboardPath, TestContext.Current.CancellationToken);
+        Assert.DoesNotContain("Maxim keyboard preferences", updatedHtml);
+        Assert.Contains("No saved memories yet", updatedHtml);
     }
 
 
@@ -178,14 +195,38 @@ public sealed class SqliteAssistantStoreTests
         await initializer.InitializeAsync(TestContext.Current.CancellationToken);
 
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "0-raw")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "0-dashboard")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "sources")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "1-desk")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "2-atoms")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "3-threads")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "briefings")));
         Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "_system", "skills")));
+        Assert.Contains("No saved memories yet.", await File.ReadAllTextAsync(Path.Combine(knowledgeRoot, "0-dashboard", "memory.md"), TestContext.Current.CancellationToken));
         Assert.Equal("custom profile", await File.ReadAllTextAsync(profilePath, TestContext.Current.CancellationToken));
         Assert.Contains("Mira House Rules", await File.ReadAllTextAsync(Path.Combine(systemRoot, "house-rules.md"), TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task InitializeAsync_preserves_existing_dashboard_file()
+    {
+        var root = Directory.CreateTempSubdirectory("mira-dashboard-tests-");
+        var knowledgeRoot = Path.Combine(root.FullName, "knowledge");
+        var dashboardRoot = Path.Combine(knowledgeRoot, "0-dashboard");
+        Directory.CreateDirectory(dashboardRoot);
+        var dashboardPath = Path.Combine(dashboardRoot, "memory.md");
+        await File.WriteAllTextAsync(dashboardPath, "custom dashboard", TestContext.Current.CancellationToken);
+        var settings = new StorageSettings
+        {
+            DatabasePath = Path.Combine(root.FullName, "mira.db"),
+            KnowledgeRootPath = knowledgeRoot,
+            EnableMarkdownMirror = true
+        };
+        var initializer = new SqliteSchemaInitializer(Options.Create(settings));
+
+        await initializer.InitializeAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("custom dashboard", await File.ReadAllTextAsync(dashboardPath, TestContext.Current.CancellationToken));
     }
 
 

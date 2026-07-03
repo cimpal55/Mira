@@ -5,6 +5,14 @@ using Mira.Infrastructure.Configuration;
 
 internal static class StoragePathResolver
 {
+    private const string DashboardDirectoryName = "0-dashboard";
+    private const string DashboardMarkdownFileName = "memory.md";
+    private const string DashboardHtmlFileName = "memory.html";
+
+    public static string DashboardMarkdownRelativePath => Path.Combine(DashboardDirectoryName, DashboardMarkdownFileName);
+
+    public static string DashboardHtmlRelativePath => Path.Combine(DashboardDirectoryName, DashboardHtmlFileName);
+
     public static string ExpandPath(string path)
     {
         var expanded = Environment.ExpandEnvironmentVariables(path);
@@ -20,6 +28,13 @@ internal static class StoragePathResolver
         return builder.ToString();
     }
 
+    public static string BuildDashboardMarkdownPath(StorageSettings settings) =>
+        CombineKnowledgePath(settings, DashboardMarkdownRelativePath);
+
+    public static string BuildDashboardHtmlPath(StorageSettings settings) =>
+        CombineKnowledgePath(settings, DashboardHtmlRelativePath);
+
+
     public static void EnsureStorageDirectories(StorageSettings settings)
     {
         var databasePath = ExpandPath(settings.DatabasePath);
@@ -31,6 +46,7 @@ internal static class StoragePathResolver
 
         var root = ExpandPath(settings.KnowledgeRootPath);
         Directory.CreateDirectory(Path.Combine(root, "0-raw"));
+        Directory.CreateDirectory(Path.Combine(root, DashboardDirectoryName));
         Directory.CreateDirectory(Path.Combine(root, "sources"));
         Directory.CreateDirectory(Path.Combine(root, "1-desk"));
         Directory.CreateDirectory(Path.Combine(root, "2-atoms"));
@@ -38,6 +54,20 @@ internal static class StoragePathResolver
         Directory.CreateDirectory(Path.Combine(root, "briefings"));
         Directory.CreateDirectory(Path.Combine(root, "_system"));
         Directory.CreateDirectory(Path.Combine(root, "_system", "skills"));
+        EnsureSeedFile(
+            Path.Combine(root, DashboardDirectoryName, DashboardMarkdownFileName),
+            """
+            ---
+            item_count: 0
+            live_view: memory.html
+            ---
+
+            # Mira Memory Dashboard
+
+            No saved memories yet.
+
+            This dashboard is regenerated after Mira saves or deletes memory. Open `memory.html` for an auto-refreshing local view.
+            """);
         EnsureSeedFile(
             Path.Combine(root, "_system", "profile.md"),
             """
