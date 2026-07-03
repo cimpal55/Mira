@@ -234,6 +234,86 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task NaturalInboxSave_saves_target_source_and_marks_current_message_processed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard note",
+            "Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider($$"""
+            {"Intent":"inbox_save","SourceCaptureId":"{{target.Id}}","Category":"Person","Title":"Maxim keyboards","Content":"Maxim likes mechanical keyboards","Subject":"Maxim","Tags":["friend","keyboard"],"Confidence":0.9}
+            """);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+        var input = "save that as a person memory";
+
+        var reply = await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Saved to Person: Maxim keyboards", reply.Text);
+        Assert.Contains(target.Id.ToString(), llm.Requests[0].Messages[0].Content, StringComparison.Ordinal);
+        Assert.Contains("Maxim likes mechanical keyboards", llm.Requests[0].Messages[0].Content, StringComparison.Ordinal);
+        Assert.DoesNotContain(input, llm.Requests[0].Messages[0].Content, StringComparison.Ordinal);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        Assert.Equal(target.Id, memory.LastSourceCaptureId);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+        var currentCapture = sourceStore.Captures.First(capture => capture.ContentText == input);
+        Assert.Equal(SourceProcessingStatus.Processed, currentCapture.Status);
+    }
+
+    [Fact]
+    public async Task NaturalInboxSkip_marks_target_source_processed_without_memory()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Ambiguous keyboard note",
+            "Maxim maybe",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider($$"""
+            {"Intent":"inbox_skip","SourceCaptureId":"{{target.Id}}"}
+            """);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+        var input = "skip that one";
+
+        var reply = await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Marked source processed: Ambiguous keyboard note", reply.Text);
+        Assert.Empty(memory.Upserts);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+        var currentCapture = sourceStore.Captures.First(capture => capture.ContentText == input);
+        Assert.Equal(SourceProcessingStatus.Processed, currentCapture.Status);
+    }
+
+    [Fact]
+    public async Task ClassifierPrompt_includes_recent_inbox_context_and_excludes_current_source()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard note",
+            "Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider("{\"Intent\":\"answer\"}", "Done.");
+        var useCase = CreateUseCase(llm, sourceStore: sourceStore);
+        var input = "what should I do with that note?";
+
+        await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        var currentCapture = sourceStore.Captures.First(capture => capture.ContentText == input);
+        var prompt = llm.Requests[0].Messages[0].Content;
+        Assert.Contains(target.Id.ToString(), prompt, StringComparison.Ordinal);
+        Assert.Contains("Maxim keyboard note", prompt, StringComparison.Ordinal);
+        Assert.Contains("Maxim likes mechanical keyboards", prompt, StringComparison.Ordinal);
+        Assert.DoesNotContain(currentCapture.Id.ToString(), prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task RememberCommand_saves_general_memory_when_classifier_fails()
     {
         var llm = new FakeLlmProvider("not json");

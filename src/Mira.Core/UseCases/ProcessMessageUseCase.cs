@@ -39,7 +39,9 @@ public sealed class ProcessMessageUseCase(
         "weekly_review",
         "health_summary",
         "clarify",
-        "chat"
+        "chat",
+        "inbox_save",
+        "inbox_skip"
     ];
 
     public async Task<AssistantReply> HandleAsync(IncomingMessage message, CancellationToken cancellationToken = default)
@@ -83,7 +85,7 @@ public sealed class ProcessMessageUseCase(
                 return commandReply;
             }
 
-            var classification = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
+            var classification = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken, excludedSourceCaptureId: sourceCapture.Id).ConfigureAwait(false);
             if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
             {
                 var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
@@ -155,7 +157,7 @@ public sealed class ProcessMessageUseCase(
             }
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
-            var classification = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
+            var classification = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken, includeInboxContext: false).ConfigureAwait(false);
             var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, classification.Action, cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
@@ -288,6 +290,8 @@ public sealed class ProcessMessageUseCase(
         return NormalizeIntent(action.Intent) switch
         {
             "save_memory" => await SaveMemoryIntentAsync(sourceMessageId, sourceCaptureId, text, action, cancellationToken).ConfigureAwait(false),
+            "inbox_save" => await SaveInboxSourceIntentAsync(action, cancellationToken).ConfigureAwait(false),
+            "inbox_skip" => await SkipInboxSourceIntentAsync(action, cancellationToken).ConfigureAwait(false),
             "answer" or "chat" => new SourceHandlingResult(
                 await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
                 SourceProcessed: true),
@@ -309,10 +313,13 @@ public sealed class ProcessMessageUseCase(
         };
     }
 
-    private async Task<ClassificationResult> ClassifyAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool forceSaveMemory, CancellationToken cancellationToken)
+    private async Task<ClassificationResult> ClassifyAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool forceSaveMemory, CancellationToken cancellationToken, Guid? excludedSourceCaptureId = null, bool includeInboxContext = true)
     {
         var recentDialogue = await GetRecentDialogueAsync(chatId, receivedAtUtc, cancellationToken).ConfigureAwait(false);
-        var prompt = BuildClassificationPrompt(forceSaveMemory, FormatConversationContext(recentDialogue));
+        var inboxContext = includeInboxContext
+            ? await FormatClassifierInboxContextAsync(excludedSourceCaptureId, cancellationToken).ConfigureAwait(false)
+            : "None.";
+        var prompt = BuildClassificationPrompt(forceSaveMemory, FormatConversationContext(recentDialogue), inboxContext);
         var request = new LlmRequest(
             [new LlmMessage(LlmRole.System, prompt), new LlmMessage(LlmRole.User, text)],
             Temperature: 0.1,
@@ -332,7 +339,7 @@ public sealed class ProcessMessageUseCase(
         }
     }
 
-    private string BuildClassificationPrompt(bool forceSaveMemory, string recentDialogue)
+    private string BuildClassificationPrompt(bool forceSaveMemory, string recentDialogue, string inboxContext)
     {
         var localNow = TimeZoneInfo.ConvertTime(clock.UtcNow, settings.TimeZone);
         var categories = string.Join(", ", Enum.GetNames<MemoryCategory>());
@@ -344,21 +351,27 @@ public sealed class ProcessMessageUseCase(
 You classify one private local-assistant message into exactly one action.
 Current local time: {{localNow:O}}
 Valid MemoryCategory names: {{categories}}
-Intent must be exactly one of: save_memory, answer, create_reminder, list_reminders, complete_reminder, run_automation, daily_brief, weekly_review, health_summary, clarify, chat.
+Intent must be exactly one of: save_memory, answer, create_reminder, list_reminders, complete_reminder, run_automation, daily_brief, weekly_review, health_summary, clarify, chat, inbox_save, inbox_skip.
 {{forceInstruction}}
 Use save_memory for durable facts about people/friends/health/medical/job/hobby/gear/thought/decision/daily notes.
 When the user sends ordinary declarative personal text, decide whether it should become saved memory without requiring /capture or /remember.
 For save_memory, choose the most specific MemoryCategory and produce a concise title, subject when obvious, useful tags, and content that preserves the durable fact.
+Use inbox_save only when the current user message clearly asks to save an existing inbox capture rather than the current message. Set SourceCaptureId to the target source id and fill Category, Title, Subject, Tags, and Content from that source.
+Use inbox_skip only when the current user message clearly asks to dismiss or ignore an existing inbox capture. Set SourceCaptureId to the target source id.
+Do not use inbox_save or inbox_skip for ordinary new facts in the current message; use save_memory for current-message facts.
 Use answer/chat only when the message is a question, drafting request, or non-durable conversation.
 Use clarify only when no safe category/action can be chosen.
 Use create_reminder only when a concrete local due date/time can be inferred.
 Use run_automation only when the user names an allowlisted local task and provides required arguments.
 Use recent dialogue only for conversation continuity, pronoun resolution, and short follow-up replies; do not invent durable facts from dialogue.
 For medical or medicine content, classify facts as Medical when they concern medication, diagnosis, dosage, clinician instructions, or treatment.
+Recent unprocessed inbox captures available for references like "that", "the last one", or "the Maxim note":
+{{inboxContext}}
+
 Recent dialogue before current message:
 {{recentDialogue}}
 Return JSON only. Do not include markdown.
-JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question.
+JSON properties: Intent, SourceCaptureId, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question.
 """;
     }
 
@@ -1010,6 +1023,22 @@ Reusable skills:
         return heading + ":\n" + string.Join("\n", memories.Select(memory => $"- {memory.Id}: {memory.Title} — {memory.Content}"));
     }
 
+    private async Task<string> FormatClassifierInboxContextAsync(Guid? excludedSourceCaptureId, CancellationToken cancellationToken)
+    {
+        var captures = await sourceStore.GetRecentSourceCapturesAsync(6, SourceProcessingStatus.Unprocessed, cancellationToken).ConfigureAwait(false);
+        var visibleCaptures = captures
+            .Where(capture => capture.Id != excludedSourceCaptureId)
+            .Take(5)
+            .ToArray();
+        if (visibleCaptures.Length == 0)
+        {
+            return "None.";
+        }
+
+        return string.Join("\n", visibleCaptures.Select(capture => $"- id={capture.Id}; kind={capture.Kind}; title={capture.Title}; created={capture.CreatedAtUtc:O}; preview={FirstCharacters(capture.ContentText, 160)}"));
+    }
+
+
     private async Task<string> SaveInboxSourceAsync(string argument, CancellationToken cancellationToken)
     {
         if (!TryParseInboxSaveArgument(argument, out var sourceCaptureId, out var category, out var title, out var content, out var error))
@@ -1045,6 +1074,70 @@ Reusable skills:
 
         await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
         return $"Saved to {saved.Category}: {saved.Title}";
+    }
+
+    private async Task<SourceHandlingResult> SaveInboxSourceIntentAsync(AssistantAction action, CancellationToken cancellationToken)
+    {
+        if (action.SourceCaptureId is null || string.IsNullOrWhiteSpace(action.Title) || string.IsNullOrWhiteSpace(action.Content))
+        {
+            return new SourceHandlingResult("Which inbox source and exact fact should I save?", SourceProcessed: false);
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(action.SourceCaptureId.Value, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return new SourceHandlingResult("Source capture not found.", SourceProcessed: true);
+        }
+
+        if (source.Status is not SourceProcessingStatus.Unprocessed)
+        {
+            return new SourceHandlingResult($"Source capture is already {source.Status}.", SourceProcessed: true);
+        }
+
+        var sourceMessageId = ParseTelegramSourceMessageId(source);
+        var sourcePath = source.FilePath;
+        if (sourceMessageId is null && string.IsNullOrWhiteSpace(sourcePath))
+        {
+            sourcePath = await memoryStore.SaveRawCaptureAsync(source.ContentText, source.CreatedAtUtc, cancellationToken).ConfigureAwait(false);
+        }
+
+        var saved = await memoryStore.UpsertAsync(
+            new MemoryUpsert(
+                action.Category ?? MemoryCategory.General,
+                action.Title.Trim(),
+                action.Content.Trim(),
+                TrimToNull(action.Subject),
+                CleanTags(action.Tags),
+                ClampConfidence(action.Confidence),
+                sourceMessageId,
+                sourcePath),
+            source.Id,
+            cancellationToken).ConfigureAwait(false);
+
+        await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        return new SourceHandlingResult($"Saved to {saved.Category}: {saved.Title}", SourceProcessed: true);
+    }
+
+    private async Task<SourceHandlingResult> SkipInboxSourceIntentAsync(AssistantAction action, CancellationToken cancellationToken)
+    {
+        if (action.SourceCaptureId is null)
+        {
+            return new SourceHandlingResult("Which inbox source should I dismiss?", SourceProcessed: false);
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(action.SourceCaptureId.Value, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return new SourceHandlingResult("Source capture not found.", SourceProcessed: true);
+        }
+
+        if (source.Status is not SourceProcessingStatus.Unprocessed)
+        {
+            return new SourceHandlingResult($"Source capture is already {source.Status}.", SourceProcessed: true);
+        }
+
+        await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        return new SourceHandlingResult($"Marked source processed: {source.Title}", SourceProcessed: true);
     }
 
     private async Task<string> SkipInboxSourceAsync(string argument, CancellationToken cancellationToken)
@@ -1084,7 +1177,7 @@ Reusable skills:
 
         try
         {
-            var classification = await ClassifyAsync(message.ChatId, source.CreatedAtUtc, source.ContentText, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
+            var classification = await ClassifyAsync(message.ChatId, source.CreatedAtUtc, source.ContentText, forceSaveMemory: false, cancellationToken, includeInboxContext: false).ConfigureAwait(false);
             if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
             {
                 return "I could not structure this source reliably. It remains in /inbox.";
@@ -1350,6 +1443,8 @@ Mira local assistant commands:
     private sealed record AssistantAction
     {
         public string Intent { get; init; } = string.Empty;
+
+        public Guid? SourceCaptureId { get; init; }
 
         public MemoryCategory? Category { get; init; }
 
