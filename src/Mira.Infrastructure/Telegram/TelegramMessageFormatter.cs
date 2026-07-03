@@ -17,6 +17,13 @@ public static class TelegramMessageFormatter
         var index = 0;
         while (index < text.Length)
         {
+            if (IsUnorderedListMarker(text, index, out var markerLength))
+            {
+                builder.Append("• ");
+                index += markerLength;
+                continue;
+            }
+
             if (IsBoldDelimiter(text, index))
             {
                 var closingIndex = FindClosingBoldDelimiter(text, index + 2);
@@ -36,6 +43,43 @@ public static class TelegramMessageFormatter
 
         return builder.ToString();
     }
+
+    private static bool IsUnorderedListMarker(string text, int index, out int markerLength)
+    {
+        markerLength = 0;
+
+        if (!IsLineStart(text, index) || index >= text.Length)
+        {
+            return false;
+        }
+
+        var marker = text[index];
+        if (marker is not ('*' or '-'))
+        {
+            return false;
+        }
+
+        var whitespaceIndex = index + 1;
+        if (whitespaceIndex >= text.Length || !IsMarkerWhitespace(text[whitespaceIndex]))
+        {
+            return false;
+        }
+
+        do
+        {
+            whitespaceIndex++;
+        }
+        while (whitespaceIndex < text.Length && IsMarkerWhitespace(text[whitespaceIndex]));
+
+        markerLength = whitespaceIndex - index;
+        return true;
+    }
+
+    private static bool IsLineStart(string text, int index) =>
+        index == 0 || text[index - 1] == '\n';
+
+    private static bool IsMarkerWhitespace(char character) =>
+        character is ' ' or '\t';
 
     private static int FindClosingBoldDelimiter(string text, int startIndex)
     {

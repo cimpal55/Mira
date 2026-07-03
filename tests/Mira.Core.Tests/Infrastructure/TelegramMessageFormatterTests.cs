@@ -14,11 +14,27 @@ public sealed class TelegramMessageFormatterTests
     }
 
     [Fact]
-    public void ToTelegramHtml_converts_bold_label_inside_telegram_bullet_like_line()
+    public void ToTelegramHtml_converts_commonmark_bullet_with_bold_label_to_telegram_bullet()
     {
         var html = TelegramMessageFormatter.ToTelegramHtml("*   **Reminders:** None.");
 
-        Assert.Equal("*   <b>Reminders:</b> None.", html);
+        Assert.Equal("• <b>Reminders:</b> None.", html);
+    }
+
+    [Fact]
+    public void ToTelegramHtml_converts_hyphen_bullet_to_telegram_bullet()
+    {
+        var html = TelegramMessageFormatter.ToTelegramHtml("- item");
+
+        Assert.Equal("• item", html);
+    }
+
+    [Fact]
+    public void ToTelegramHtml_keeps_inline_asterisk_text_unchanged()
+    {
+        var html = TelegramMessageFormatter.ToTelegramHtml("2 * 3");
+
+        Assert.Equal("2 * 3", html);
     }
 
     [Fact]
