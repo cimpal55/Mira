@@ -104,7 +104,7 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             var useCase = scope.ServiceProvider.GetRequiredService<ProcessMessageUseCase>();
             var incoming = new IncomingMessage(message.Chat.Id, message.MessageId, message.Text, DateTimeOffset.UtcNow);
             var reply = await useCase.HandleAsync(incoming, cancellationToken).ConfigureAwait(false);
-            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken, BuildReplyMarkup(reply.Text)).ConfigureAwait(false);
+            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken, BuildReplyMarkup(reply)).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -178,9 +178,9 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     private async Task HandleCommandCallbackAsync(ITelegramBotClient botClient, CallbackQuery callbackQuery, Message message, string data, CancellationToken cancellationToken)
     {
         var command = data[CommandCallbackPrefix.Length..];
-        if (!CallbackCommands.Contains(command))
+        if (!IsSupportedCallbackCommand(command))
         {
-            await botClient.AnswerCallbackQuery(callbackQuery.Id, "Unsupported Mira folder.", cancellationToken: cancellationToken).ConfigureAwait(false);
+            await botClient.AnswerCallbackQuery(callbackQuery.Id, "Unsupported Mira action.", cancellationToken: cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -191,7 +191,7 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             var incoming = new IncomingMessage(message.Chat.Id, message.MessageId, command, DateTimeOffset.UtcNow);
             var reply = await useCase.HandleAsync(incoming, cancellationToken).ConfigureAwait(false);
             await botClient.AnswerCallbackQuery(callbackQuery.Id, "Opened.", cancellationToken: cancellationToken).ConfigureAwait(false);
-            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken, BuildReplyMarkup(reply.Text)).ConfigureAwait(false);
+            await SendChunksAsync(message.Chat.Id, reply.Text, cancellationToken, BuildReplyMarkup(reply)).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -252,20 +252,29 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         return chunks;
     }
 
-    private static InlineKeyboardMarkup? BuildReplyMarkup(string text)
+    private static InlineKeyboardMarkup? BuildReplyMarkup(AssistantReply reply)
     {
-        var confirmId = ExtractConfirmId(text);
+        if (reply.Actions.Count > 0)
+        {
+            return new InlineKeyboardMarkup(reply.Actions.Select(action =>
+                new[]
+                {
+                    InlineKeyboardButton.WithCallbackData(action.Text, CommandCallbackPrefix + action.Command)
+                }));
+        }
+
+        var confirmId = ExtractConfirmId(reply.Text);
         if (confirmId is not null)
         {
             return new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Confirm automation", ConfirmCallbackPrefix + confirmId.Value));
         }
 
-        if (IsFolderMenuText(text))
+        if (IsFolderMenuText(reply.Text))
         {
             return BuildFolderMenuMarkup();
         }
 
-        return IsFolderSectionText(text)
+        return IsFolderSectionText(reply.Text)
             ? new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Back to menu", CommandCallbackPrefix + "/menu"))
             : null;
     }
@@ -298,6 +307,25 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
                 InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings")
             ]
         ]);
+    }
+
+    private static bool IsSupportedCallbackCommand(string command)
+    {
+        return CallbackCommands.Contains(command)
+            || TryGetGuidCallbackCommandArgument(command, "/inbox-skip", out _)
+            || TryGetGuidCallbackCommandArgument(command, "/inbox-retry", out _)
+            || TryGetGuidCallbackCommandArgument(command, "/inbox-remember", out _);
+    }
+
+    private static bool TryGetGuidCallbackCommandArgument(string text, string command, out Guid id)
+    {
+        id = default;
+        if (!text.StartsWith(command + " ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        return Guid.TryParse(text[command.Length..].Trim(), out id);
     }
 
     private static bool IsFolderMenuText(string text) => text.StartsWith("Mira folders", StringComparison.Ordinal);

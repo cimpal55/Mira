@@ -89,7 +89,11 @@ public sealed class ProcessMessageUseCase(
             if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
             {
                 var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
-                return await ReplyAsync(message, answer, cancellationToken).ConfigureAwait(false);
+                return await ReplyAsync(
+                    message,
+                    answer,
+                    cancellationToken,
+                    BuildClarificationActions(sourceCapture.Id)).ConfigureAwait(false);
             }
 
             var handlingResult = await HandleActionAsync(message, text, message.MessageId, sourceCapture.Id, classification.Action, cancellationToken).ConfigureAwait(false);
@@ -98,7 +102,7 @@ public sealed class ProcessMessageUseCase(
                 await sourceStore.MarkSourceCaptureProcessedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
             }
 
-            return await ReplyAsync(message, handlingResult.ReplyText, cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, handlingResult.ReplyText, cancellationToken, handlingResult.Actions).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -137,6 +141,11 @@ public sealed class ProcessMessageUseCase(
         if (TryGetCommandArgument(text, "/inbox-retry", out var inboxRetryText))
         {
             return await ReplyAsync(message, await RetryInboxSourceAsync(message, inboxRetryText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (TryGetCommandArgument(text, "/inbox-remember", out var inboxRememberText))
+        {
+            return await ReplyAsync(message, await RememberInboxSourceAsync(message, inboxRememberText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         }
 
         if (IsCommand(text, "/inbox"))
@@ -306,7 +315,8 @@ public sealed class ProcessMessageUseCase(
                 string.IsNullOrWhiteSpace(action.Question)
                     ? "What should I do with this: save it, remind you, or answer a question?"
                     : action.Question.Trim(),
-                SourceProcessed: false),
+                SourceProcessed: false,
+                Actions: BuildClarificationActions(sourceCaptureId)),
             _ => new SourceHandlingResult(
                 await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false),
                 SourceProcessed: false)
@@ -779,7 +789,11 @@ Health context:
         return $"Automation {pending.Name}: {status}{output}{error}";
     }
 
-    private async Task<AssistantReply> ReplyAsync(IncomingMessage message, string text, CancellationToken cancellationToken)
+    private async Task<AssistantReply> ReplyAsync(
+        IncomingMessage message,
+        string text,
+        CancellationToken cancellationToken,
+        IReadOnlyList<AssistantReplyAction>? actions = null)
     {
         var trimmed = TrimReply(text);
         await memoryStore.SaveConversationMessageAsync(
@@ -790,8 +804,15 @@ Health context:
                 trimmed,
                 clock.UtcNow),
             cancellationToken).ConfigureAwait(false);
-        return new AssistantReply(trimmed);
+        return new AssistantReply(trimmed, actions ?? []);
     }
+
+    private static IReadOnlyList<AssistantReplyAction> BuildClarificationActions(Guid sourceCaptureId) =>
+    [
+        new("Save as memory", $"/inbox-remember {sourceCaptureId}"),
+        new("Skip", $"/inbox-skip {sourceCaptureId}"),
+        new("Try again", $"/inbox-retry {sourceCaptureId}")
+    ];
 
     private string TrimReply(string text)
     {
@@ -1199,6 +1220,43 @@ Reusable skills:
         }
     }
 
+    private async Task<string> RememberInboxSourceAsync(IncomingMessage message, string argument, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(argument.Trim(), out var sourceCaptureId))
+        {
+            return "Usage: /inbox-remember <source-guid>";
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return "Source capture not found.";
+        }
+
+        if (source.Status is not SourceProcessingStatus.Unprocessed)
+        {
+            return $"Source capture is already {source.Status}.";
+        }
+
+        var sourcePath = source.FilePath;
+        if (string.IsNullOrWhiteSpace(sourcePath))
+        {
+            sourcePath = await memoryStore.SaveRawCaptureAsync(source.ContentText, source.CreatedAtUtc, cancellationToken).ConfigureAwait(false);
+        }
+
+        var classification = await ClassifyAsync(message.ChatId, source.CreatedAtUtc, source.ContentText, forceSaveMemory: true, cancellationToken, includeInboxContext: false).ConfigureAwait(false);
+        var saved = await SaveCapturedMemoryAsync(
+            source.ContentText,
+            sourcePath,
+            ParseTelegramSourceMessageId(source) ?? message.MessageId,
+            source.Id,
+            classification.Action,
+            cancellationToken).ConfigureAwait(false);
+
+        await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        return $"Saved to {saved.Category}: {saved.Title}";
+    }
+
     private static bool TryParseInboxSaveArgument(
         string argument,
         out Guid sourceCaptureId,
@@ -1344,7 +1402,6 @@ Commands:
         {
             return 0.5;
         }
-
         return Math.Clamp(confidence, 0.0, 1.0);
     }
 
@@ -1438,7 +1495,7 @@ Mira local assistant commands:
 
     private sealed record ClassificationResult(AssistantAction? Action, bool IsStructured);
 
-    private sealed record SourceHandlingResult(string ReplyText, bool SourceProcessed);
+    private sealed record SourceHandlingResult(string ReplyText, bool SourceProcessed, IReadOnlyList<AssistantReplyAction>? Actions = null);
 
     private sealed record AssistantAction
     {

@@ -314,6 +314,104 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task ClarifyIntent_returns_source_action_buttons_for_current_capture()
+    {
+        var sourceStore = new FakeSourceStore();
+        var llm = new FakeLlmProvider("""
+            {"Intent":"clarify","Question":"Save this as memory?"}
+            """);
+        var useCase = CreateUseCase(llm, sourceStore: sourceStore);
+        var input = "Nika is doing great and likes jazz";
+
+        var reply = await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        var currentCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, currentCapture.Status);
+        Assert.Equal("Save this as memory?", reply.Text);
+        Assert.Collection(
+            reply.Actions,
+            action =>
+            {
+                Assert.Equal("Save as memory", action.Text);
+                Assert.Equal($"/inbox-remember {currentCapture.Id}", action.Command);
+            },
+            action =>
+            {
+                Assert.Equal("Skip", action.Text);
+                Assert.Equal($"/inbox-skip {currentCapture.Id}", action.Command);
+            },
+            action =>
+            {
+                Assert.Equal("Try again", action.Text);
+                Assert.Equal($"/inbox-retry {currentCapture.Id}", action.Command);
+            });
+    }
+
+    [Fact]
+    public async Task InvalidClassifierJson_returns_source_action_buttons_for_current_capture()
+    {
+        var sourceStore = new FakeSourceStore();
+        var llm = new FakeLlmProvider("not json", "I am not sure yet.");
+        var useCase = CreateUseCase(llm, sourceStore: sourceStore);
+        var input = "Nika maybe likes something";
+
+        var reply = await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        var currentCapture = Assert.Single(sourceStore.Captures);
+        Assert.Contains("I could not structure this reliably", reply.Text, StringComparison.Ordinal);
+        Assert.Contains(reply.Actions, action => action.Command == $"/inbox-remember {currentCapture.Id}");
+        Assert.Contains(reply.Actions, action => action.Command == $"/inbox-skip {currentCapture.Id}");
+        Assert.Contains(reply.Actions, action => action.Command == $"/inbox-retry {currentCapture.Id}");
+    }
+
+    [Fact]
+    public async Task InboxRememberCommand_saves_source_as_memory_and_marks_target_processed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Nika jazz note",
+            "Nika is doing great and likes jazz",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero),
+            ExternalId: "777"), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider("""
+            {"Intent":"save_memory","Category":"Person","Title":"Nika likes jazz","Content":"Nika is doing great and likes jazz","Subject":"Nika","Tags":["jazz"],"Confidence":0.9}
+            """);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-remember {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Saved to Person: Nika likes jazz", reply.Text);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        Assert.Equal("Nika likes jazz", upsert.Title);
+        Assert.Equal(777, upsert.SourceMessageId);
+        Assert.Equal(target.Id, memory.LastSourceCaptureId);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+    }
+
+    [Fact]
+    public async Task InboxRememberCommand_reports_processed_source_without_saving_again()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Processed Nika note",
+            "Nika likes jazz",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        await sourceStore.MarkSourceCaptureProcessedAsync(target.Id, new DateTimeOffset(2026, 7, 1, 5, 30, 0, TimeSpan.Zero), TestContext.Current.CancellationToken);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-remember {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Source capture is already Processed.", reply.Text);
+        Assert.Empty(memory.Upserts);
+    }
+
+    [Fact]
     public async Task RememberCommand_saves_general_memory_when_classifier_fails()
     {
         var llm = new FakeLlmProvider("not json");
