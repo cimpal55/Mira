@@ -122,6 +122,16 @@ public sealed class ProcessMessageUseCase(
             return await ReplyAsync(message, OperatingSystemText(), cancellationToken).ConfigureAwait(false);
         }
 
+        if (TryGetCommandArgument(text, "/inbox-save", out var inboxSaveText))
+        {
+            return await ReplyAsync(message, await SaveInboxSourceAsync(inboxSaveText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (TryGetCommandArgument(text, "/inbox-skip", out var inboxSkipText))
+        {
+            return await ReplyAsync(message, await SkipInboxSourceAsync(inboxSkipText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
         if (IsCommand(text, "/inbox"))
         {
             return await ReplyAsync(message, await FormatInboxAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
@@ -899,6 +909,8 @@ Commands:
 - /remember <text> — save text and extract memory
 - /capture <text> — save raw notes quickly
 - /inbox - recent unprocessed captures
+- /inbox-save <source-guid> <category> | <title> | <content> — save an inbox source
+- /inbox-skip <source-guid> — mark an inbox source processed
 - /sources - recent source captures
 - /search <text> — search saved memories
 - /people — list saved people
@@ -992,6 +1004,104 @@ Reusable skills:
         return heading + ":\n" + string.Join("\n", memories.Select(memory => $"- {memory.Id}: {memory.Title} — {memory.Content}"));
     }
 
+    private async Task<string> SaveInboxSourceAsync(string argument, CancellationToken cancellationToken)
+    {
+        if (!TryParseInboxSaveArgument(argument, out var sourceCaptureId, out var category, out var title, out var content, out var error))
+        {
+            return error;
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return "Source capture not found.";
+        }
+
+        var sourceMessageId = ParseTelegramSourceMessageId(source);
+        var sourcePath = source.FilePath;
+        if (sourceMessageId is null && string.IsNullOrWhiteSpace(sourcePath))
+        {
+            sourcePath = await memoryStore.SaveRawCaptureAsync(source.ContentText, source.CreatedAtUtc, cancellationToken).ConfigureAwait(false);
+        }
+
+        var saved = await memoryStore.UpsertAsync(
+            new MemoryUpsert(
+                category,
+                title,
+                content,
+                null,
+                [],
+                1.0,
+                sourceMessageId,
+                sourcePath),
+            source.Id,
+            cancellationToken).ConfigureAwait(false);
+
+        await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        return $"Saved to {saved.Category}: {saved.Title}";
+    }
+
+    private async Task<string> SkipInboxSourceAsync(string argument, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(argument.Trim(), out var sourceCaptureId))
+        {
+            return "Usage: /inbox-skip <source-guid>";
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return "Source capture not found.";
+        }
+
+        await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+        return $"Marked source processed: {source.Title}";
+    }
+
+    private static bool TryParseInboxSaveArgument(
+        string argument,
+        out Guid sourceCaptureId,
+        out MemoryCategory category,
+        out string title,
+        out string content,
+        out string error)
+    {
+        sourceCaptureId = default;
+        category = default;
+        title = string.Empty;
+        content = string.Empty;
+        error = InboxSaveUsage();
+
+        var parts = argument.Split('|', 3, StringSplitOptions.TrimEntries);
+        if (parts.Length != 3)
+        {
+            return false;
+        }
+
+        var header = parts[0].Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (header.Length != 2 || !Guid.TryParse(header[0], out sourceCaptureId))
+        {
+            return false;
+        }
+
+        if (!Enum.TryParse(header[1], ignoreCase: true, out category) || !Enum.IsDefined(category))
+        {
+            error = $"Unknown memory category \"{header[1]}\". Valid categories: {string.Join(", ", Enum.GetNames<MemoryCategory>())}.";
+            return false;
+        }
+
+        title = parts[1];
+        content = parts[2];
+        return !string.IsNullOrWhiteSpace(title) && !string.IsNullOrWhiteSpace(content);
+    }
+
+    private static long? ParseTelegramSourceMessageId(SourceCapture source)
+    {
+        return long.TryParse(source.ExternalId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var messageId) ? messageId : null;
+    }
+
+    private static string InboxSaveUsage() => "Usage: /inbox-save <source-guid> <category> | <title> | <content>";
+
     private async Task<string> FormatInboxAsync(Guid excludedSourceCaptureId, CancellationToken cancellationToken)
     {
         var captures = await sourceStore.GetRecentSourceCapturesAsync(20, SourceProcessingStatus.Unprocessed, cancellationToken).ConfigureAwait(false);
@@ -1001,7 +1111,10 @@ Reusable skills:
             return "Inbox is empty. New Telegram text messages will appear here before processing.";
         }
 
-        return "Inbox captures:\n" + string.Join("\n", visibleCaptures.Select(FormatSourceCaptureRow));
+        return "Inbox captures:\n"
+            + "Use /inbox-save <source-guid> <category> | <title> | <content> to save one.\n"
+            + "Use /inbox-skip <source-guid> to dismiss one.\n"
+            + string.Join("\n", visibleCaptures.Select(FormatSourceCaptureRow));
     }
 
     private async Task<string> FormatSourcesAsync(Guid excludedSourceCaptureId, CancellationToken cancellationToken)
@@ -1158,6 +1271,8 @@ Mira local assistant commands:
 /notes — open daily notes folder
 /settings — show local runtime status
 /inbox - recent unprocessed captures
+/inbox-save <source-guid> <category> | <title> | <content> — save an inbox source
+/inbox-skip <source-guid> — mark an inbox source processed
 /sources - recent source captures
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory

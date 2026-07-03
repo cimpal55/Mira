@@ -96,6 +96,73 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task InboxSaveCommand_saves_memory_and_marks_target_source_processed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard note",
+            "Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-save {target.Id} Person | Maxim keyboards | Maxim likes mechanical keyboards"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Saved to Person: Maxim keyboards", reply.Text);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        Assert.Equal("Maxim keyboards", upsert.Title);
+        Assert.Equal("Maxim likes mechanical keyboards", upsert.Content);
+        Assert.Equal(target.Id, memory.LastSourceCaptureId);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero), targetCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task InboxSkipCommand_marks_target_source_processed_without_saving_memory()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Ambiguous keyboard note",
+            "Maxim maybe",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-skip {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Marked source processed: Ambiguous keyboard note", reply.Text);
+        Assert.Empty(memory.Upserts);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero), targetCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task InboxSaveCommand_with_invalid_category_leaves_target_source_unprocessed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard note",
+            "Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-save {target.Id} Unknown | Maxim keyboards | Maxim likes mechanical keyboards"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("Unknown memory category", reply.Text, StringComparison.Ordinal);
+        Assert.Empty(memory.Upserts);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, targetCapture.Status);
+        Assert.Null(targetCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
     public async Task RememberCommand_saves_general_memory_when_classifier_fails()
     {
         var llm = new FakeLlmProvider("not json");
