@@ -284,7 +284,12 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         for (var index = 0; index < chunks.Count; index++)
         {
             var chunkReplyMarkup = index == 0 ? replyMarkup : null;
-            await _botClient.SendMessage(chatId, chunks[index], replyMarkup: chunkReplyMarkup, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await _botClient.SendMessage(
+                chatId,
+                TelegramMessageFormatter.ToTelegramHtml(chunks[index]),
+                parseMode: ParseMode.Html,
+                replyMarkup: chunkReplyMarkup,
+                cancellationToken: cancellationToken).ConfigureAwait(false);
         }
     }
 
