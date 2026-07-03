@@ -23,6 +23,7 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     private static readonly HashSet<string> CallbackCommands = new(StringComparer.Ordinal)
     {
         "/menu",
+        "/os",
         "/chat",
         "/reminders",
         "/memory",
@@ -272,19 +273,22 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         return new InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton.WithCallbackData("AI Chat", CommandCallbackPrefix + "/chat"),
-                InlineKeyboardButton.WithCallbackData("Reminders", CommandCallbackPrefix + "/reminders")
+                InlineKeyboardButton.WithCallbackData("Mira OS", CommandCallbackPrefix + "/os"),
+                InlineKeyboardButton.WithCallbackData("AI Chat", CommandCallbackPrefix + "/chat")
             ],
             [
-                InlineKeyboardButton.WithCallbackData("Memory", CommandCallbackPrefix + "/memory"),
-                InlineKeyboardButton.WithCallbackData("Health", CommandCallbackPrefix + "/health")
+                InlineKeyboardButton.WithCallbackData("Reminders", CommandCallbackPrefix + "/reminders"),
+                InlineKeyboardButton.WithCallbackData("Memory", CommandCallbackPrefix + "/memory")
             ],
             [
-                InlineKeyboardButton.WithCallbackData("People", CommandCallbackPrefix + "/people"),
-                InlineKeyboardButton.WithCallbackData("Decisions", CommandCallbackPrefix + "/decisions")
+                InlineKeyboardButton.WithCallbackData("Health", CommandCallbackPrefix + "/health"),
+                InlineKeyboardButton.WithCallbackData("People", CommandCallbackPrefix + "/people")
             ],
             [
-                InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes"),
+                InlineKeyboardButton.WithCallbackData("Decisions", CommandCallbackPrefix + "/decisions"),
+                InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes")
+            ],
+            [
                 InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings")
             ]
         ]);
@@ -294,7 +298,8 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
 
     private static bool IsFolderSectionText(string text)
     {
-        return text.StartsWith("AI Chat", StringComparison.Ordinal)
+        return text.StartsWith("Mira personal operating system", StringComparison.Ordinal)
+            || text.StartsWith("AI Chat", StringComparison.Ordinal)
             || text.StartsWith("Reminders", StringComparison.Ordinal)
             || text.StartsWith("Memory", StringComparison.Ordinal)
             || text.StartsWith("Daily Notes", StringComparison.Ordinal)
@@ -320,6 +325,7 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
         return
         [
             new BotCommand { Command = "menu", Description = "Show folder menu" },
+            new BotCommand { Command = "os", Description = "Show Mira personal OS map" },
             new BotCommand { Command = "chat", Description = "Open AI chat folder" },
             new BotCommand { Command = "reminders", Description = "Open reminders folder" },
             new BotCommand { Command = "memory", Description = "Open memory folder" },

@@ -158,6 +158,37 @@ public sealed class SqliteAssistantStoreTests
         Assert.False(second);
     }
 
+    [Fact]
+    public async Task InitializeAsync_creates_personal_os_vault_scaffold_without_overwriting_system_files()
+    {
+        var root = Directory.CreateTempSubdirectory("mira-vault-tests-");
+        var knowledgeRoot = Path.Combine(root.FullName, "knowledge");
+        var systemRoot = Path.Combine(knowledgeRoot, "_system");
+        Directory.CreateDirectory(systemRoot);
+        var profilePath = Path.Combine(systemRoot, "profile.md");
+        await File.WriteAllTextAsync(profilePath, "custom profile", TestContext.Current.CancellationToken);
+        var settings = new StorageSettings
+        {
+            DatabasePath = Path.Combine(root.FullName, "mira.db"),
+            KnowledgeRootPath = knowledgeRoot,
+            EnableMarkdownMirror = true
+        };
+        var initializer = new SqliteSchemaInitializer(Options.Create(settings));
+
+        await initializer.InitializeAsync(TestContext.Current.CancellationToken);
+
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "0-raw")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "sources")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "1-desk")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "2-atoms")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "3-threads")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "briefings")));
+        Assert.True(Directory.Exists(Path.Combine(knowledgeRoot, "_system", "skills")));
+        Assert.Equal("custom profile", await File.ReadAllTextAsync(profilePath, TestContext.Current.CancellationToken));
+        Assert.Contains("Mira House Rules", await File.ReadAllTextAsync(Path.Combine(systemRoot, "house-rules.md"), TestContext.Current.CancellationToken));
+    }
+
+
     internal sealed record StoreFixture(SqliteAssistantStore Store, string ConnectionString, string KnowledgeRootPath)
     {
         public static async Task<StoreFixture> CreateAsync()

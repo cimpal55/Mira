@@ -92,6 +92,11 @@ public sealed class ProcessMessageUseCase(
             return await ReplyAsync(message, HelpText(), cancellationToken).ConfigureAwait(false);
         }
 
+        if (IsCommand(text, "/os"))
+        {
+            return await ReplyAsync(message, OperatingSystemText(), cancellationToken).ConfigureAwait(false);
+        }
+
         if (TryGetCommandArgument(text, "/capture", out var captureText) || TryGetCommandArgument(text, "/remember", out captureText))
         {
             if (string.IsNullOrWhiteSpace(captureText))
@@ -805,6 +810,7 @@ Mira folders
 /people — saved people
 /decisions — saved decisions
 /settings — local runtime status
+/os — personal operating system map
 
 Use /help for every command.
 """;
@@ -873,6 +879,47 @@ Memory dashboard: {settings.KnowledgeDashboardPath}
 
 Secrets are loaded from configuration/environment and are never shown here.
 """;
+    }
+
+    private static string OperatingSystemText()
+    {
+        var sources = FormatDefinitions(PersonalOperatingSystemMap.SourceKinds.Select(source => $"{source.Name}: {source.Purpose}"));
+        var tiers = FormatDefinitions(PersonalOperatingSystemMap.MemoryTiers.Select(tier => $"{tier.Name}: {tier.Purpose}"));
+        var stages = FormatDefinitions(PersonalOperatingSystemMap.NightShiftStages.Select(stage => $"{stage.Name}: {stage.Purpose}"));
+        var folders = FormatDefinitions(PersonalOperatingSystemMap.VaultFolders.Select(folder => $"{folder.Path}: {folder.Purpose}"));
+        var planning = FormatDefinitions(PersonalOperatingSystemMap.PlanningLayers.Select(layer => $"{layer.Name}: {layer.Purpose}"));
+        var models = FormatDefinitions(PersonalOperatingSystemMap.ModelLanes.Select(lane => $"{lane.Name}: {lane.Purpose}"));
+        var skills = FormatDefinitions(PersonalOperatingSystemMap.ProceduralSkills.Select(skill => $"{skill.Name}: {skill.Purpose}"));
+
+        return $"""
+Mira personal operating system
+
+Capture first:
+{sources}
+
+Memory tiers:
+{tiers}
+
+Night shift:
+{stages}
+
+Obsidian vault:
+{folders}
+
+Tasks and planning:
+{planning}
+
+Model routing:
+{models}
+
+Reusable skills:
+{skills}
+""";
+    }
+
+    private static string FormatDefinitions(IEnumerable<string> definitions)
+    {
+        return string.Join("\n", definitions.Select(definition => $"- {definition}"));
     }
 
     private static string FormatMemories(string heading, IReadOnlyList<MemoryItem> memories)
@@ -1015,6 +1062,7 @@ Commands:
 Mira local assistant commands:
 /start or /menu — show folder menu
 /help — show this detailed command list
+/os — show Mira's personal operating system map
 /chat — open simple AI chat folder
 /reminders — open reminders folder and list pending reminders
 /memory — open saved memory folder

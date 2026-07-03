@@ -63,6 +63,29 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task OsCommand_returns_personal_operating_system_map_without_llm()
+    {
+        var llm = new FakeLlmProvider();
+        var useCase = CreateUseCase(llm);
+
+        var reply = await useCase.HandleAsync(Message("/os"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("Mira personal operating system", reply.Text);
+        Assert.Contains("Prompt memory", reply.Text);
+        Assert.Contains("Episodic memory", reply.Text);
+        Assert.Contains("Semantic memory", reply.Text);
+        Assert.Contains("Procedural memory", reply.Text);
+        Assert.Contains("Scout", reply.Text);
+        Assert.Contains("Refinery", reply.Text);
+        Assert.Contains("Cartographer", reply.Text);
+        Assert.Contains("Critic", reply.Text);
+        Assert.Contains("Editor", reply.Text);
+        Assert.Contains("_system/skills/", reply.Text);
+        Assert.Empty(llm.Requests);
+    }
+
+
+    [Fact]
     public async Task TodayCommand_lists_due_reminders_and_new_memories()
     {
         var dueToday = Guid.Parse("40000000-0000-0000-0000-000000000001");
