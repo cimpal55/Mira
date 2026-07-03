@@ -390,7 +390,79 @@ public sealed class ProcessMessageUseCaseTests
 
         var reply = await useCase.HandleAsync(Message("Maxim likes mechanical keyboards"), TestContext.Current.CancellationToken);
 
+        Assert.Contains("Saved to Person: Maxim keyboards", reply.Text, StringComparison.Ordinal);
         Assert.Contains("Related:", reply.Text);
+    }
+
+    [Fact]
+    public async Task PlainTextDurableFact_saves_to_classifier_category_and_marks_source_processed()
+    {
+        var llm = new FakeLlmProvider("""
+            {"Intent":"save_memory","Category":"Person","Title":"Maxim keyboards","Content":"Maxim likes mechanical keyboards","Subject":"Maxim","Tags":["friend","keyboard"],"Confidence":0.9}
+            """);
+        var memory = new FakeMemoryStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("my friend Maxim likes mechanical keyboards"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Saved to Person: Maxim keyboards", reply.Text, StringComparison.Ordinal);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(sourceCapture.Id, memory.LastSourceCaptureId);
+        Assert.Equal(SourceProcessingStatus.Processed, sourceCapture.Status);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero), sourceCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task AnswerIntent_marks_source_processed_without_saving_memory()
+    {
+        var llm = new FakeLlmProvider(
+            "{\"Intent\":\"answer\"}",
+            "A prime number is divisible only by 1 and itself.");
+        var memory = new FakeMemoryStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("What is a prime number?"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("A prime number is divisible only by 1 and itself.", reply.Text);
+        Assert.Empty(memory.Upserts);
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceProcessingStatus.Processed, sourceCapture.Status);
+    }
+
+    [Fact]
+    public async Task InvalidClassifierJson_leaves_source_unprocessed_for_inbox_review()
+    {
+        var llm = new FakeLlmProvider("not json", "Fallback answer.");
+        var memory = new FakeMemoryStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("Maxim probably likes split keyboards"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("I could not structure this reliably", reply.Text, StringComparison.Ordinal);
+        Assert.Empty(memory.Upserts);
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, sourceCapture.Status);
+    }
+
+    [Fact]
+    public async Task ClarifyIntent_leaves_source_unprocessed()
+    {
+        var llm = new FakeLlmProvider("""
+            {"Intent":"clarify","Question":"Should I save this as a memory or just answer?"}
+            """);
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, sourceStore: sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("Maxim maybe"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Should I save this as a memory or just answer?", reply.Text);
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, sourceCapture.Status);
     }
 
     [Fact]
@@ -685,6 +757,21 @@ public sealed class ProcessMessageUseCaseTests
                 {
                     Status = SourceProcessingStatus.Processed,
                     ProcessedAtUtc = processedAtUtc.ToUniversalTime()
+                };
+            }
+
+            return Task.CompletedTask;
+        }
+
+        public Task MarkSourceCaptureFailedAsync(Guid id, DateTimeOffset failedAtUtc, CancellationToken cancellationToken = default)
+        {
+            var index = _captures.FindIndex(capture => capture.Id == id);
+            if (index >= 0)
+            {
+                _captures[index] = _captures[index] with
+                {
+                    Status = SourceProcessingStatus.Failed,
+                    ProcessedAtUtc = failedAtUtc.ToUniversalTime()
                 };
             }
 

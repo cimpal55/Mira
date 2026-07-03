@@ -11,6 +11,8 @@ public interface ISourceStore
     Task<SourceCapture?> GetSourceCaptureAsync(Guid id, CancellationToken cancellationToken = default);
 
     Task MarkSourceCaptureProcessedAsync(Guid id, DateTimeOffset processedAtUtc, CancellationToken cancellationToken = default);
+
+    Task MarkSourceCaptureFailedAsync(Guid id, DateTimeOffset failedAtUtc, CancellationToken cancellationToken = default);
 }
 
 public interface IMemoryStore

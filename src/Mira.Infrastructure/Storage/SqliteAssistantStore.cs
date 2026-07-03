@@ -188,6 +188,21 @@ WHERE id = @id;
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public async Task MarkSourceCaptureFailedAsync(Guid id, DateTimeOffset failedAtUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+UPDATE source_captures
+SET status = @status, processed_utc = @processed_utc
+WHERE id = @id;
+""";
+        Add(command, "@status", SourceProcessingStatus.Failed.ToString());
+        Add(command, "@processed_utc", FormatUtc(failedAtUtc));
+        Add(command, "@id", id.ToString());
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<MemoryItem> UpsertAsync(MemoryUpsert request, Guid? sourceCaptureId = null, CancellationToken cancellationToken = default)
     {
         if (request.SourceMessageId is null && string.IsNullOrWhiteSpace(request.SourcePath))

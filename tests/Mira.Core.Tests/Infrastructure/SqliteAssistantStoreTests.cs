@@ -95,6 +95,25 @@ public sealed class SqliteAssistantStoreTests
     }
 
     [Fact]
+    public async Task MarkSourceCaptureFailedAsync_sets_failed_status_and_timestamp()
+    {
+        var fixture = await StoreFixture.CreateAsync();
+        var source = await fixture.Store.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Failed note",
+            "Failed content",
+            new DateTimeOffset(2026, 7, 1, 4, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var failedAtUtc = new DateTimeOffset(2026, 7, 1, 4, 5, 0, TimeSpan.Zero);
+
+        await fixture.Store.MarkSourceCaptureFailedAsync(source.Id, failedAtUtc, TestContext.Current.CancellationToken);
+
+        var failedCapture = await fixture.Store.GetSourceCaptureAsync(source.Id, TestContext.Current.CancellationToken);
+        Assert.NotNull(failedCapture);
+        Assert.Equal(SourceProcessingStatus.Failed, failedCapture.Status);
+        Assert.Equal(failedAtUtc.ToUniversalTime(), failedCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
     public async Task UpsertAsync_with_sourceCaptureId_creates_memory_source_link()
     {
         var fixture = await StoreFixture.CreateAsync();

@@ -74,25 +74,35 @@ public sealed class ProcessMessageUseCase(
                 }),
             cancellationToken).ConfigureAwait(false);
 
-        var commandReply = await TryHandleCommandAsync(message, text, sourceCapture.Id, cancellationToken).ConfigureAwait(false);
-        if (commandReply is not null)
+        try
         {
-            return commandReply;
-        }
+            var commandReply = await TryHandleCommandAsync(message, text, sourceCapture.Id, cancellationToken).ConfigureAwait(false);
+            if (commandReply is not null)
+            {
+                await sourceStore.MarkSourceCaptureProcessedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+                return commandReply;
+            }
 
-        var action = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
-        string replyText;
-        if (action is null || !IsKnownIntent(action.Intent))
-        {
-            var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
-            replyText = answer;
-        }
-        else
-        {
-            replyText = await HandleActionAsync(message, text, sourceCapture.Id, action, cancellationToken).ConfigureAwait(false);
-        }
+            var classification = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
+            if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
+            {
+                var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
+                return await ReplyAsync(message, answer, cancellationToken).ConfigureAwait(false);
+            }
 
-        return await ReplyAsync(message, replyText, cancellationToken).ConfigureAwait(false);
+            var handlingResult = await HandleActionAsync(message, text, sourceCapture.Id, classification.Action, cancellationToken).ConfigureAwait(false);
+            if (handlingResult.SourceProcessed)
+            {
+                await sourceStore.MarkSourceCaptureProcessedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+            }
+
+            return await ReplyAsync(message, handlingResult.ReplyText, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await sourceStore.MarkSourceCaptureFailedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+            throw;
+        }
     }
 
     private async Task<AssistantReply?> TryHandleCommandAsync(IncomingMessage message, string text, Guid sourceCaptureId, CancellationToken cancellationToken)
@@ -130,8 +140,8 @@ public sealed class ProcessMessageUseCase(
             }
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
-            var action = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
-            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, action, cancellationToken).ConfigureAwait(false);
+            var classification = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
+            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, classification.Action, cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
 
@@ -257,28 +267,34 @@ public sealed class ProcessMessageUseCase(
         return null;
     }
 
-    private async Task<string> HandleActionAsync(IncomingMessage message, string text, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
+    private async Task<SourceHandlingResult> HandleActionAsync(IncomingMessage message, string text, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
     {
         var receivedAtUtc = ToUtc(message.ReceivedAt);
         return NormalizeIntent(action.Intent) switch
         {
             "save_memory" => await SaveMemoryIntentAsync(message.MessageId, sourceCaptureId, text, action, cancellationToken).ConfigureAwait(false),
-            "answer" or "chat" => await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
+            "answer" or "chat" => new SourceHandlingResult(
+                await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
+                SourceProcessed: true),
             "create_reminder" => await CreateReminderAsync(action, cancellationToken).ConfigureAwait(false),
-            "list_reminders" => FormatReminders(await reminderStore.GetPendingAsync(20, cancellationToken).ConfigureAwait(false)),
-            "complete_reminder" => await CompleteReminderAsync(text, cancellationToken).ConfigureAwait(false),
-            "daily_brief" => await GenerateDailyBriefAsync(cancellationToken).ConfigureAwait(false),
-            "weekly_review" => await GenerateWeeklyReviewAsync(cancellationToken).ConfigureAwait(false),
-            "health_summary" => await GenerateHealthSummaryAsync(text, cancellationToken).ConfigureAwait(false),
-            "run_automation" => await StageAutomationAsync(action, cancellationToken).ConfigureAwait(false),
-            "clarify" => string.IsNullOrWhiteSpace(action.Question)
-                ? "What should I do with this: save it, remind you, or answer a question?"
-                : action.Question.Trim(),
-            _ => await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false)
+            "list_reminders" => new SourceHandlingResult(FormatReminders(await reminderStore.GetPendingAsync(20, cancellationToken).ConfigureAwait(false)), SourceProcessed: true),
+            "complete_reminder" => new SourceHandlingResult(await CompleteReminderAsync(text, cancellationToken).ConfigureAwait(false), SourceProcessed: true),
+            "daily_brief" => new SourceHandlingResult(await GenerateDailyBriefAsync(cancellationToken).ConfigureAwait(false), SourceProcessed: true),
+            "weekly_review" => new SourceHandlingResult(await GenerateWeeklyReviewAsync(cancellationToken).ConfigureAwait(false), SourceProcessed: true),
+            "health_summary" => new SourceHandlingResult(await GenerateHealthSummaryAsync(text, cancellationToken).ConfigureAwait(false), SourceProcessed: true),
+            "run_automation" => new SourceHandlingResult(await StageAutomationAsync(action, cancellationToken).ConfigureAwait(false), SourceProcessed: true),
+            "clarify" => new SourceHandlingResult(
+                string.IsNullOrWhiteSpace(action.Question)
+                    ? "What should I do with this: save it, remind you, or answer a question?"
+                    : action.Question.Trim(),
+                SourceProcessed: false),
+            _ => new SourceHandlingResult(
+                await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false),
+                SourceProcessed: false)
         };
     }
 
-    private async Task<AssistantAction?> ClassifyAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool forceSaveMemory, CancellationToken cancellationToken)
+    private async Task<ClassificationResult> ClassifyAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool forceSaveMemory, CancellationToken cancellationToken)
     {
         var recentDialogue = await GetRecentDialogueAsync(chatId, receivedAtUtc, cancellationToken).ConfigureAwait(false);
         var prompt = BuildClassificationPrompt(forceSaveMemory, FormatConversationContext(recentDialogue));
@@ -291,11 +307,13 @@ public sealed class ProcessMessageUseCase(
         {
             var response = await llmProvider.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
             var action = JsonSerializer.Deserialize<AssistantAction>(response.Content, JsonOptions);
-            return action is null || string.IsNullOrWhiteSpace(action.Intent) ? null : action;
+            return action is null || string.IsNullOrWhiteSpace(action.Intent)
+                ? new ClassificationResult(null, IsStructured: false)
+                : new ClassificationResult(action, IsStructured: true);
         }
         catch (JsonException)
         {
-            return null;
+            return new ClassificationResult(null, IsStructured: false);
         }
     }
 
@@ -314,6 +332,10 @@ Valid MemoryCategory names: {{categories}}
 Intent must be exactly one of: save_memory, answer, create_reminder, list_reminders, complete_reminder, run_automation, daily_brief, weekly_review, health_summary, clarify, chat.
 {{forceInstruction}}
 Use save_memory for durable facts about people/friends/health/medical/job/hobby/gear/thought/decision/daily notes.
+When the user sends ordinary declarative personal text, decide whether it should become saved memory without requiring /capture or /remember.
+For save_memory, choose the most specific MemoryCategory and produce a concise title, subject when obvious, useful tags, and content that preserves the durable fact.
+Use answer/chat only when the message is a question, drafting request, or non-durable conversation.
+Use clarify only when no safe category/action can be chosen.
 Use create_reminder only when a concrete local due date/time can be inferred.
 Use run_automation only when the user names an allowlisted local task and provides required arguments.
 Use recent dialogue only for conversation continuity, pronoun resolution, and short follow-up replies; do not invent durable facts from dialogue.
@@ -367,11 +389,11 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string> SaveMemoryIntentAsync(long sourceMessageId, Guid sourceCaptureId, string text, AssistantAction action, CancellationToken cancellationToken)
+    private async Task<SourceHandlingResult> SaveMemoryIntentAsync(long sourceMessageId, Guid sourceCaptureId, string text, AssistantAction action, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(action.Title) || string.IsNullOrWhiteSpace(action.Content))
         {
-            return "What title and exact fact should I save?";
+            return new SourceHandlingResult("What title and exact fact should I save?", SourceProcessed: false);
         }
 
         var sourcePath = await memoryStore.SaveRawCaptureAsync(text, clock.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -392,7 +414,10 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
             new MemorySearchQuery(saved.Content, [], 3),
             cancellationToken).ConfigureAwait(false);
         var relatedLine = FormatRelated(related.Where(memory => memory.Id != saved.Id).Take(3).ToArray());
-        return string.IsNullOrEmpty(relatedLine) ? $"Saved: {saved.Title}" : $"Saved: {saved.Title}\nRelated: {relatedLine}";
+        var replyText = $"Saved to {saved.Category}: {saved.Title}";
+        return new SourceHandlingResult(
+            string.IsNullOrEmpty(relatedLine) ? replyText : $"{replyText}\nRelated: {relatedLine}",
+            SourceProcessed: true);
     }
 
     private async Task<string> AnswerWithContextAsync(long chatId, DateTimeOffset receivedAtUtc, string text, bool appendStructuringFailure, CancellationToken cancellationToken)
@@ -562,17 +587,17 @@ Memories:
 
 
 
-    private async Task<string> CreateReminderAsync(AssistantAction action, CancellationToken cancellationToken)
+    private async Task<SourceHandlingResult> CreateReminderAsync(AssistantAction action, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(action.Title) || action.DueLocal is null)
         {
-            return "When should I remind you? Include a date or time.";
+            return new SourceHandlingResult("When should I remind you? Include a date or time.", SourceProcessed: false);
         }
 
         var dueUtc = ConvertLocalToUtc(action.DueLocal.Value);
         if (dueUtc <= clock.UtcNow)
         {
-            return "That reminder time is in the past. What future time should I use?";
+            return new SourceHandlingResult("That reminder time is in the past. What future time should I use?", SourceProcessed: false);
         }
 
         var repeat = action.Repeat ?? ReminderRepeatKind.None;
@@ -580,7 +605,7 @@ Memories:
             new ReminderCreateRequest(action.Title.Trim(), TrimToNull(action.Content), dueUtc, repeat),
             cancellationToken).ConfigureAwait(false);
         var localDue = FormatLocalDateTime(reminder.DueAtUtc);
-        return $"Reminder saved: {reminder.Title}\nDue: {localDue}\nRepeat: {reminder.RepeatKind}";
+        return new SourceHandlingResult($"Reminder saved: {reminder.Title}\nDue: {localDue}\nRepeat: {reminder.RepeatKind}", SourceProcessed: true);
     }
 
     private async Task<string> CompleteReminderAsync(string text, CancellationToken cancellationToken)
@@ -854,6 +879,7 @@ Use /help for every command.
 AI Chat
 
 Send a normal message and Mira will answer using local context when saved memory matches.
+Send ordinary personal notes too; Mira will decide whether to save them and which memory category fits.
 
 Useful commands:
 - /menu — switch folders
@@ -1151,6 +1177,10 @@ Mira local assistant commands:
 /confirm <guid> — run a staged local automation
 """;
     }
+
+    private sealed record ClassificationResult(AssistantAction? Action, bool IsStructured);
+
+    private sealed record SourceHandlingResult(string ReplyText, bool SourceProcessed);
 
     private sealed record AssistantAction
     {
