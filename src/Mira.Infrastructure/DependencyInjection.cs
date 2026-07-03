@@ -53,6 +53,7 @@ public static class DependencyInjection
         services.AddSingleton<KnowledgeMarkdownWriter>();
         services.AddSingleton<IKnowledgeArtifactWriter>(provider => provider.GetRequiredService<KnowledgeMarkdownWriter>());
         services.AddSingleton<SqliteAssistantStore>();
+        services.AddSingleton<ISourceStore>(provider => provider.GetRequiredService<SqliteAssistantStore>());
         services.AddSingleton<IMemoryStore>(provider => provider.GetRequiredService<SqliteAssistantStore>());
         services.AddSingleton<IReminderStore>(provider => provider.GetRequiredService<SqliteAssistantStore>());
         services.AddSingleton<IProactiveRunStore>(provider => provider.GetRequiredService<SqliteAssistantStore>());

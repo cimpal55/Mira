@@ -11,7 +11,7 @@ using Mira.Core.Interfaces;
 using Mira.Core.Models;
 using Mira.Infrastructure.Configuration;
 
-public sealed class SqliteAssistantStore : IMemoryStore, IReminderStore, IProactiveRunStore, IAutomationStore
+public sealed class SqliteAssistantStore : ISourceStore, IMemoryStore, IReminderStore, IProactiveRunStore, IAutomationStore
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly StorageSettings _settings;
@@ -106,7 +106,89 @@ VALUES (@id, @source_path, @content, @content_hash, @created_utc);
         throw new InvalidOperationException("Could not allocate a unique raw capture source path.");
     }
 
-    public async Task<MemoryItem> UpsertAsync(MemoryUpsert request, CancellationToken cancellationToken = default)
+    public async Task<SourceCapture> SaveSourceCaptureAsync(SourceCaptureCreate request, CancellationToken cancellationToken = default)
+    {
+        var id = Guid.NewGuid();
+        var title = NormalizeSourceTitle(request.Title);
+        var createdAtUtc = request.CreatedAtUtc.ToUniversalTime();
+        var metadata = request.Metadata is null
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string>(request.Metadata, StringComparer.Ordinal);
+        var sourceCapture = new SourceCapture(
+            id,
+            request.Kind,
+            title,
+            request.ContentText,
+            ComputeSha256(request.ContentText),
+            createdAtUtc,
+            SourceProcessingStatus.Unprocessed,
+            null,
+            string.IsNullOrWhiteSpace(request.ExternalId) ? null : request.ExternalId.Trim(),
+            string.IsNullOrWhiteSpace(request.FilePath) ? null : request.FilePath.Trim(),
+            metadata);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+INSERT INTO source_captures (id, kind, title, content_text, content_hash, external_id, file_path, metadata_json, status, created_utc, processed_utc)
+VALUES (@id, @kind, @title, @content_text, @content_hash, @external_id, @file_path, @metadata_json, @status, @created_utc, @processed_utc);
+""";
+        AddSourceCaptureParameters(command, sourceCapture);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        return sourceCapture;
+    }
+
+    public async Task<IReadOnlyList<SourceCapture>> GetRecentSourceCapturesAsync(int limit, SourceProcessingStatus? status = null, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        var statusFilter = status is null ? string.Empty : "WHERE status = @status";
+        command.CommandText = $$"""
+SELECT id, kind, title, content_text, content_hash, created_utc, status, processed_utc, external_id, file_path, metadata_json
+FROM source_captures
+{{statusFilter}}
+ORDER BY created_utc DESC
+LIMIT @limit;
+""";
+        if (status is not null)
+        {
+            Add(command, "@status", status.Value.ToString());
+        }
+
+        Add(command, "@limit", NormalizeSourceLimit(limit));
+        return await ReadSourceCapturesAsync(command, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<SourceCapture?> GetSourceCaptureAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+SELECT id, kind, title, content_text, content_hash, created_utc, status, processed_utc, external_id, file_path, metadata_json
+FROM source_captures
+WHERE id = @id;
+""";
+        Add(command, "@id", id.ToString());
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        return await reader.ReadAsync(cancellationToken).ConfigureAwait(false) ? ReadSourceCapture(reader) : null;
+    }
+
+    public async Task MarkSourceCaptureProcessedAsync(Guid id, DateTimeOffset processedAtUtc, CancellationToken cancellationToken = default)
+    {
+        await using var connection = await OpenConnectionAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+UPDATE source_captures
+SET status = @status, processed_utc = @processed_utc
+WHERE id = @id;
+""";
+        Add(command, "@status", SourceProcessingStatus.Processed.ToString());
+        Add(command, "@processed_utc", FormatUtc(processedAtUtc));
+        Add(command, "@id", id.ToString());
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<MemoryItem> UpsertAsync(MemoryUpsert request, Guid? sourceCaptureId = null, CancellationToken cancellationToken = default)
     {
         if (request.SourceMessageId is null && string.IsNullOrWhiteSpace(request.SourcePath))
         {
@@ -144,6 +226,11 @@ VALUES (@id, @category, @title, @subject, @content, @tags_json, @confidence, @so
 
             await DeleteFtsRowAsync(connection, transaction, item.Id, cancellationToken).ConfigureAwait(false);
             await InsertFtsRowAsync(connection, transaction, item, cancellationToken).ConfigureAwait(false);
+            if (sourceCaptureId is not null)
+            {
+                await InsertMemorySourceLinkAsync(connection, transaction, item.Id, sourceCaptureId.Value, now, cancellationToken).ConfigureAwait(false);
+            }
+
             transaction.Commit();
         }
         catch
@@ -556,6 +643,27 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private static async Task InsertMemorySourceLinkAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid memoryId,
+        Guid sourceCaptureId,
+        DateTimeOffset createdAtUtc,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+INSERT OR IGNORE INTO memory_source_links (memory_id, source_capture_id, relationship, created_utc)
+VALUES (@memory_id, @source_capture_id, @relationship, @created_utc);
+""";
+        Add(command, "@memory_id", memoryId.ToString());
+        Add(command, "@source_capture_id", sourceCaptureId.ToString());
+        Add(command, "@relationship", "derived_from");
+        Add(command, "@created_utc", FormatUtc(createdAtUtc));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task RefreshMemoryDashboardAsync(CancellationToken cancellationToken)
     {
         var items = await GetRecentAsync(_settings.DashboardMemoryLimit, null, cancellationToken).ConfigureAwait(false);
@@ -596,6 +704,34 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
         }
 
         return items;
+    }
+
+    private static async Task<IReadOnlyList<SourceCapture>> ReadSourceCapturesAsync(SqliteCommand command, CancellationToken cancellationToken)
+    {
+        var captures = new List<SourceCapture>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            captures.Add(ReadSourceCapture(reader));
+        }
+
+        return captures;
+    }
+
+    private static SourceCapture ReadSourceCapture(SqliteDataReader reader)
+    {
+        return new SourceCapture(
+            Guid.Parse(reader.GetString(0)),
+            TryParseSourceKind(reader.GetString(1)),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            ParseUtc(reader.GetString(5)),
+            TryParseSourceProcessingStatus(reader.GetString(6)),
+            reader.IsDBNull(7) ? null : ParseUtc(reader.GetString(7)),
+            reader.IsDBNull(8) ? null : reader.GetString(8),
+            reader.IsDBNull(9) ? null : reader.GetString(9),
+            JsonSerializer.Deserialize<Dictionary<string, string>>(reader.GetString(10), JsonOptions) ?? new Dictionary<string, string>());
     }
 
     private static MemoryItem ReadMemoryItem(SqliteDataReader reader)
@@ -657,6 +793,21 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
         Add(command, "@source_path", item.SourcePath is null ? DBNull.Value : item.SourcePath);
         Add(command, "@created_utc", FormatUtc(item.CreatedAt));
         Add(command, "@updated_utc", FormatUtc(item.UpdatedAt));
+    }
+
+    private static void AddSourceCaptureParameters(SqliteCommand command, SourceCapture sourceCapture)
+    {
+        Add(command, "@id", sourceCapture.Id.ToString());
+        Add(command, "@kind", sourceCapture.Kind.ToString());
+        Add(command, "@title", sourceCapture.Title);
+        Add(command, "@content_text", sourceCapture.ContentText);
+        Add(command, "@content_hash", sourceCapture.ContentHash);
+        Add(command, "@external_id", sourceCapture.ExternalId is null ? DBNull.Value : sourceCapture.ExternalId);
+        Add(command, "@file_path", sourceCapture.FilePath is null ? DBNull.Value : sourceCapture.FilePath);
+        Add(command, "@metadata_json", JsonSerializer.Serialize(sourceCapture.Metadata, JsonOptions));
+        Add(command, "@status", sourceCapture.Status.ToString());
+        Add(command, "@created_utc", FormatUtc(sourceCapture.CreatedAtUtc));
+        Add(command, "@processed_utc", sourceCapture.ProcessedAtUtc is null ? DBNull.Value : FormatUtc(sourceCapture.ProcessedAtUtc.Value));
     }
 
     private static void AddReminderParameters(SqliteCommand command, Reminder reminder)
@@ -730,6 +881,22 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
             .ToArray();
     }
 
+    private static SourceKind TryParseSourceKind(string value)
+    {
+        return Enum.TryParse<SourceKind>(value, out var kind) ? kind : SourceKind.Text;
+    }
+
+    private static SourceProcessingStatus TryParseSourceProcessingStatus(string value)
+    {
+        return Enum.TryParse<SourceProcessingStatus>(value, out var status) ? status : SourceProcessingStatus.Failed;
+    }
+
+    private static string NormalizeSourceTitle(string title)
+    {
+        var normalized = title.Trim();
+        return Truncate(normalized.Length == 0 ? "Untitled source" : normalized, 120);
+    }
+
     private static string BuildRawCapturePath(Guid id, DateTimeOffset createdAtUtc)
     {
         var utc = createdAtUtc.ToUniversalTime();
@@ -754,6 +921,8 @@ VALUES (@memory_item_id, @title, @subject, @content, @tags);
     }
 
     private static int NormalizeLimit(int limit) => Math.Clamp(limit, 1, 500);
+
+    private static int NormalizeSourceLimit(int limit) => Math.Clamp(limit, 1, 200);
 
     private static string Truncate(string value, int maxLength) => value.Length <= maxLength ? value : value[..maxLength];
 

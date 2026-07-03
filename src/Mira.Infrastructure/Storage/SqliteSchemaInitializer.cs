@@ -39,6 +39,33 @@ CREATE TABLE IF NOT EXISTS raw_captures (
     created_utc TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS source_captures (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content_text TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    external_id TEXT NULL,
+    file_path TEXT NULL,
+    metadata_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_utc TEXT NOT NULL,
+    processed_utc TEXT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_source_captures_created ON source_captures(created_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_source_captures_status_created ON source_captures(status, created_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_source_captures_hash ON source_captures(content_hash);
+CREATE TABLE IF NOT EXISTS memory_source_links (
+    memory_id TEXT NOT NULL,
+    source_capture_id TEXT NOT NULL,
+    relationship TEXT NOT NULL,
+    created_utc TEXT NOT NULL,
+    PRIMARY KEY (memory_id, source_capture_id, relationship),
+    FOREIGN KEY (memory_id) REFERENCES memory_items(id) ON DELETE CASCADE,
+    FOREIGN KEY (source_capture_id) REFERENCES source_captures(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_memory_source_links_source ON memory_source_links(source_capture_id);
+
 CREATE TABLE IF NOT EXISTS memory_items (
     id TEXT PRIMARY KEY,
     category TEXT NOT NULL,

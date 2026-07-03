@@ -26,6 +26,76 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task CaptureCommand_saves_source_capture_and_links_memory()
+    {
+        var input = "/capture my friend Maxim likes mechanical keyboards";
+        var llm = new FakeLlmProvider("not json");
+        var memory = new FakeMemoryStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message(input), TestContext.Current.CancellationToken);
+
+        Assert.Contains("Saved", reply.Text, StringComparison.Ordinal);
+        var capture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceKind.TelegramMessage, capture.Kind);
+        Assert.Equal(input, capture.ContentText);
+        Assert.Equal(capture.Id, memory.LastSourceCaptureId);
+    }
+
+    [Fact]
+    public async Task InboxCommand_lists_unprocessed_source_captures()
+    {
+        var sourceStore = new FakeSourceStore();
+        await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard preference",
+            "Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var useCase = CreateUseCase(sourceStore: sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("/inbox"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Inbox captures:", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("Maxim keyboard preference", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("TelegramMessage [Unprocessed]", reply.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SourcesCommand_lists_recent_source_captures()
+    {
+        var sourceStore = new FakeSourceStore();
+        var processed = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Processed keyboard note",
+            "Processed content",
+            new DateTimeOffset(2026, 7, 1, 4, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        await sourceStore.MarkSourceCaptureProcessedAsync(processed.Id, new DateTimeOffset(2026, 7, 1, 4, 5, 0, TimeSpan.Zero), TestContext.Current.CancellationToken);
+        await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Unprocessed keyboard note",
+            "Unprocessed content",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var useCase = CreateUseCase(sourceStore: sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("/sources"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Recent source captures:", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("Processed keyboard note", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("Unprocessed keyboard note", reply.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task InboxCommand_returns_empty_message_when_no_unprocessed_captures()
+    {
+        var useCase = CreateUseCase();
+
+        var reply = await useCase.HandleAsync(Message("/inbox"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("Inbox is empty. New Telegram text messages will appear here before processing.", reply.Text);
+    }
+
+    [Fact]
     public async Task RememberCommand_saves_general_memory_when_classifier_fails()
     {
         var llm = new FakeLlmProvider("not json");
@@ -107,7 +177,7 @@ public sealed class ProcessMessageUseCaseTests
                 new Reminder(dueTomorrow, "Tomorrow task", null, new DateTimeOffset(2026, 7, 2, 9, 0, 0, TimeSpan.Zero), ReminderRepeatKind.None, ReminderStatus.Pending, DateTimeOffset.UtcNow, null, null)
             ]
         };
-        var useCase = CreateUseCase(new FakeLlmProvider(), memory, reminders);
+        var useCase = CreateUseCase(new FakeLlmProvider(), memory, reminderStore: reminders);
 
         var reply = await useCase.HandleAsync(Message("/today"), TestContext.Current.CancellationToken);
 
@@ -468,6 +538,7 @@ public sealed class ProcessMessageUseCaseTests
     private static ProcessMessageUseCase CreateUseCase(
         FakeLlmProvider? llm = null,
         FakeMemoryStore? memoryStore = null,
+        FakeSourceStore? sourceStore = null,
         FakeReminderStore? reminderStore = null,
         FakeAutomationStore? automationStore = null,
         FakeAutomationRunner? automationRunner = null,
@@ -477,6 +548,7 @@ public sealed class ProcessMessageUseCaseTests
         return new ProcessMessageUseCase(
             llm ?? new FakeLlmProvider(),
             memoryStore ?? new FakeMemoryStore(),
+            sourceStore ?? new FakeSourceStore(),
             reminderStore ?? new FakeReminderStore(),
             automationStore ?? new FakeAutomationStore(Guid.NewGuid()),
             automationRunner ?? new FakeAutomationRunner(),
@@ -518,6 +590,7 @@ public sealed class ProcessMessageUseCaseTests
     {
         public List<string> RawCaptures { get; } = [];
         public List<MemoryUpsert> Upserts { get; } = [];
+        public Guid? LastSourceCaptureId { get; private set; }
         public Func<MemorySearchQuery, IReadOnlyList<MemoryItem>> SearchHandler { get; init; } = _ => [];
         public Func<MemoryCategory, int, IReadOnlyList<MemoryItem>> GetByCategoryHandler { get; init; } = (_, _) => [];
         public Func<int, DateTimeOffset?, IReadOnlyList<MemoryItem>> GetRecentHandler { get; init; } = (_, _) => [];
@@ -538,9 +611,14 @@ public sealed class ProcessMessageUseCaseTests
             return Task.FromResult("0-raw/2026/07/raw.md");
         }
 
-        public Task<MemoryItem> UpsertAsync(MemoryUpsert request, CancellationToken cancellationToken = default)
+        public Task<MemoryItem> UpsertAsync(MemoryUpsert request, Guid? sourceCaptureId = null, CancellationToken cancellationToken = default)
         {
             Upserts.Add(request);
+            if (sourceCaptureId is not null)
+            {
+                LastSourceCaptureId = sourceCaptureId;
+            }
+
             return Task.FromResult(new MemoryItem(Guid.NewGuid(), request.Category, request.Title, request.Content, request.Subject, request.Tags, request.Confidence, request.SourceMessageId, request.SourcePath, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
         }
 
@@ -557,6 +635,61 @@ public sealed class ProcessMessageUseCaseTests
         public Task<IReadOnlyList<MemoryItem>> GetStaleAsync(DateTimeOffset olderThanUtc, int limit, CancellationToken cancellationToken = default) => Task.FromResult(GetStaleHandler(olderThanUtc, limit));
 
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class FakeSourceStore : ISourceStore
+    {
+        private readonly List<SourceCapture> _captures = [];
+
+        public IReadOnlyList<SourceCapture> Captures => _captures;
+
+        public Task<SourceCapture> SaveSourceCaptureAsync(SourceCaptureCreate request, CancellationToken cancellationToken = default)
+        {
+            var capture = new SourceCapture(
+                Guid.NewGuid(),
+                request.Kind,
+                string.IsNullOrWhiteSpace(request.Title) ? "Untitled source" : request.Title.Trim(),
+                request.ContentText,
+                "fake-hash",
+                request.CreatedAtUtc.ToUniversalTime(),
+                SourceProcessingStatus.Unprocessed,
+                null,
+                request.ExternalId,
+                request.FilePath,
+                request.Metadata ?? new Dictionary<string, string>());
+            _captures.Add(capture);
+            return Task.FromResult(capture);
+        }
+
+        public Task<IReadOnlyList<SourceCapture>> GetRecentSourceCapturesAsync(int limit, SourceProcessingStatus? status = null, CancellationToken cancellationToken = default)
+        {
+            var captures = _captures
+                .Where(capture => status is null || capture.Status == status)
+                .OrderByDescending(capture => capture.CreatedAtUtc)
+                .Take(Math.Clamp(limit, 1, 200))
+                .ToArray();
+            return Task.FromResult<IReadOnlyList<SourceCapture>>(captures);
+        }
+
+        public Task<SourceCapture?> GetSourceCaptureAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(_captures.FirstOrDefault(capture => capture.Id == id));
+        }
+
+        public Task MarkSourceCaptureProcessedAsync(Guid id, DateTimeOffset processedAtUtc, CancellationToken cancellationToken = default)
+        {
+            var index = _captures.FindIndex(capture => capture.Id == id);
+            if (index >= 0)
+            {
+                _captures[index] = _captures[index] with
+                {
+                    Status = SourceProcessingStatus.Processed,
+                    ProcessedAtUtc = processedAtUtc.ToUniversalTime()
+                };
+            }
+
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeReminderStore : IReminderStore

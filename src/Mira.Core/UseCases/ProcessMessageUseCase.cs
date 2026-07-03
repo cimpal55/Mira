@@ -9,6 +9,7 @@ using Mira.Core.Models;
 public sealed class ProcessMessageUseCase(
     ILlmProvider llmProvider,
     IMemoryStore memoryStore,
+    ISourceStore sourceStore,
     IReminderStore reminderStore,
     IAutomationStore automationStore,
     IAutomationRunner automationRunner,
@@ -59,7 +60,21 @@ public sealed class ProcessMessageUseCase(
                 receivedAtUtc),
             cancellationToken).ConfigureAwait(false);
 
-        var commandReply = await TryHandleCommandAsync(message, text, cancellationToken).ConfigureAwait(false);
+        var sourceCapture = await sourceStore.SaveSourceCaptureAsync(
+            new SourceCaptureCreate(
+                SourceKind.TelegramMessage,
+                FirstCharacters(text, 80),
+                text,
+                receivedAtUtc,
+                ExternalId: message.MessageId.ToString(CultureInfo.InvariantCulture),
+                Metadata: new Dictionary<string, string>
+                {
+                    ["chat_id"] = message.ChatId.ToString(CultureInfo.InvariantCulture),
+                    ["telegram_message_id"] = message.MessageId.ToString(CultureInfo.InvariantCulture)
+                }),
+            cancellationToken).ConfigureAwait(false);
+
+        var commandReply = await TryHandleCommandAsync(message, text, sourceCapture.Id, cancellationToken).ConfigureAwait(false);
         if (commandReply is not null)
         {
             return commandReply;
@@ -74,13 +89,13 @@ public sealed class ProcessMessageUseCase(
         }
         else
         {
-            replyText = await HandleActionAsync(message, text, action, cancellationToken).ConfigureAwait(false);
+            replyText = await HandleActionAsync(message, text, sourceCapture.Id, action, cancellationToken).ConfigureAwait(false);
         }
 
         return await ReplyAsync(message, replyText, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<AssistantReply?> TryHandleCommandAsync(IncomingMessage message, string text, CancellationToken cancellationToken)
+    private async Task<AssistantReply?> TryHandleCommandAsync(IncomingMessage message, string text, Guid sourceCaptureId, CancellationToken cancellationToken)
     {
         if (IsCommand(text, "/start") || IsCommand(text, "/menu"))
         {
@@ -97,6 +112,16 @@ public sealed class ProcessMessageUseCase(
             return await ReplyAsync(message, OperatingSystemText(), cancellationToken).ConfigureAwait(false);
         }
 
+        if (IsCommand(text, "/inbox"))
+        {
+            return await ReplyAsync(message, await FormatInboxAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (IsCommand(text, "/sources"))
+        {
+            return await ReplyAsync(message, await FormatSourcesAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
         if (TryGetCommandArgument(text, "/capture", out var captureText) || TryGetCommandArgument(text, "/remember", out captureText))
         {
             if (string.IsNullOrWhiteSpace(captureText))
@@ -106,7 +131,7 @@ public sealed class ProcessMessageUseCase(
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
             var action = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken).ConfigureAwait(false);
-            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, action, cancellationToken).ConfigureAwait(false);
+            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, action, cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
 
@@ -142,7 +167,7 @@ public sealed class ProcessMessageUseCase(
 
         if (TryGetCommandArgument(text, "/note", out var noteText))
         {
-            return await ReplyAsync(message, await SaveDailyNoteAsync(message.MessageId, noteText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+            return await ReplyAsync(message, await SaveDailyNoteAsync(message.MessageId, sourceCaptureId, noteText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         }
 
         if (TryGetCommandArgument(text, "/profile", out var profileName))
@@ -232,12 +257,12 @@ public sealed class ProcessMessageUseCase(
         return null;
     }
 
-    private async Task<string> HandleActionAsync(IncomingMessage message, string text, AssistantAction action, CancellationToken cancellationToken)
+    private async Task<string> HandleActionAsync(IncomingMessage message, string text, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
     {
         var receivedAtUtc = ToUtc(message.ReceivedAt);
         return NormalizeIntent(action.Intent) switch
         {
-            "save_memory" => await SaveMemoryIntentAsync(message.MessageId, text, action, cancellationToken).ConfigureAwait(false),
+            "save_memory" => await SaveMemoryIntentAsync(message.MessageId, sourceCaptureId, text, action, cancellationToken).ConfigureAwait(false),
             "answer" or "chat" => await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
             "create_reminder" => await CreateReminderAsync(action, cancellationToken).ConfigureAwait(false),
             "list_reminders" => FormatReminders(await reminderStore.GetPendingAsync(20, cancellationToken).ConfigureAwait(false)),
@@ -304,6 +329,7 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
         string rawText,
         string sourcePath,
         long sourceMessageId,
+        Guid sourceCaptureId,
         AssistantAction? action,
         CancellationToken cancellationToken)
     {
@@ -322,6 +348,7 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
                     ClampConfidence(action.Confidence),
                     sourceMessageId,
                     sourcePath),
+                sourceCaptureId,
                 cancellationToken).ConfigureAwait(false);
         }
 
@@ -336,10 +363,11 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
                 0.4,
                 sourceMessageId,
                 sourcePath),
+            sourceCaptureId,
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<string> SaveMemoryIntentAsync(long sourceMessageId, string text, AssistantAction action, CancellationToken cancellationToken)
+    private async Task<string> SaveMemoryIntentAsync(long sourceMessageId, Guid sourceCaptureId, string text, AssistantAction action, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(action.Title) || string.IsNullOrWhiteSpace(action.Content))
         {
@@ -357,6 +385,7 @@ JSON properties: Intent, Category, Title, Subject, Content, Tags, Confidence, Du
                 ClampConfidence(action.Confidence),
                 sourceMessageId,
                 sourcePath),
+            sourceCaptureId,
             cancellationToken).ConfigureAwait(false);
 
         var related = await memoryStore.SearchAsync(
@@ -470,7 +499,7 @@ Recent dialogue before current message:
         return $"Today ({localNow:yyyy-MM-dd})\n\n{remindersSection}\n\n{memoriesSection}";
     }
 
-    private async Task<string> SaveDailyNoteAsync(long sourceMessageId, string noteText, CancellationToken cancellationToken)
+    private async Task<string> SaveDailyNoteAsync(long sourceMessageId, Guid sourceCaptureId, string noteText, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(noteText))
         {
@@ -489,6 +518,7 @@ Recent dialogue before current message:
                 1.0,
                 sourceMessageId,
                 sourcePath),
+            sourceCaptureId,
             cancellationToken).ConfigureAwait(false);
         return $"Daily note saved: {saved.Title}";
     }
@@ -806,6 +836,8 @@ Mira folders
 /reminders — reminders and alerts
 /memory — saved memories, search, people, decisions
 /notes — daily notes, today, brief, weekly review
+/inbox - recent unprocessed captures
+/sources - recent source captures
 /health — health summary
 /people — saved people
 /decisions — saved decisions
@@ -840,6 +872,8 @@ Use this folder for saved facts and review.
 Commands:
 - /remember <text> — save text and extract memory
 - /capture <text> — save raw notes quickly
+- /inbox - recent unprocessed captures
+- /sources - recent source captures
 - /search <text> — search saved memories
 - /people — list saved people
 - /profile <name> — summarize a person
@@ -930,6 +964,35 @@ Reusable skills:
         }
 
         return heading + ":\n" + string.Join("\n", memories.Select(memory => $"- {memory.Id}: {memory.Title} — {memory.Content}"));
+    }
+
+    private async Task<string> FormatInboxAsync(Guid excludedSourceCaptureId, CancellationToken cancellationToken)
+    {
+        var captures = await sourceStore.GetRecentSourceCapturesAsync(20, SourceProcessingStatus.Unprocessed, cancellationToken).ConfigureAwait(false);
+        var visibleCaptures = captures.Where(capture => capture.Id != excludedSourceCaptureId).ToArray();
+        if (visibleCaptures.Length == 0)
+        {
+            return "Inbox is empty. New Telegram text messages will appear here before processing.";
+        }
+
+        return "Inbox captures:\n" + string.Join("\n", visibleCaptures.Select(FormatSourceCaptureRow));
+    }
+
+    private async Task<string> FormatSourcesAsync(Guid excludedSourceCaptureId, CancellationToken cancellationToken)
+    {
+        var captures = await sourceStore.GetRecentSourceCapturesAsync(20, null, cancellationToken).ConfigureAwait(false);
+        var visibleCaptures = captures.Where(capture => capture.Id != excludedSourceCaptureId).ToArray();
+        if (visibleCaptures.Length == 0)
+        {
+            return "No source captures saved yet.";
+        }
+
+        return "Recent source captures:\n" + string.Join("\n", visibleCaptures.Select(FormatSourceCaptureRow));
+    }
+
+    private static string FormatSourceCaptureRow(SourceCapture capture)
+    {
+        return $"- {capture.Id}: {capture.Kind} [{capture.Status}] {capture.Title} ({capture.CreatedAtUtc:O})";
     }
 
     private string FormatRemindersSection(IReadOnlyList<Reminder> reminders)
@@ -1068,6 +1131,8 @@ Mira local assistant commands:
 /memory — open saved memory folder
 /notes — open daily notes folder
 /settings — show local runtime status
+/inbox - recent unprocessed captures
+/sources - recent source captures
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory
 /note <text> — save a deterministic daily note

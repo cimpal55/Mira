@@ -2,6 +2,17 @@ namespace Mira.Core.Interfaces;
 
 using Mira.Core.Models;
 
+public interface ISourceStore
+{
+    Task<SourceCapture> SaveSourceCaptureAsync(SourceCaptureCreate request, CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<SourceCapture>> GetRecentSourceCapturesAsync(int limit, SourceProcessingStatus? status = null, CancellationToken cancellationToken = default);
+
+    Task<SourceCapture?> GetSourceCaptureAsync(Guid id, CancellationToken cancellationToken = default);
+
+    Task MarkSourceCaptureProcessedAsync(Guid id, DateTimeOffset processedAtUtc, CancellationToken cancellationToken = default);
+}
+
 public interface IMemoryStore
 {
     Task SaveConversationMessageAsync(ConversationMessage message, CancellationToken cancellationToken = default);
@@ -10,7 +21,7 @@ public interface IMemoryStore
 
     Task<string> SaveRawCaptureAsync(string content, DateTimeOffset createdAtUtc, CancellationToken cancellationToken = default);
 
-    Task<MemoryItem> UpsertAsync(MemoryUpsert request, CancellationToken cancellationToken = default);
+    Task<MemoryItem> UpsertAsync(MemoryUpsert request, Guid? sourceCaptureId = null, CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<MemoryItem>> SearchAsync(MemorySearchQuery query, CancellationToken cancellationToken = default);
 

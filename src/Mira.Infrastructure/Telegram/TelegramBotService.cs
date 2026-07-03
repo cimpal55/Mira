@@ -24,6 +24,8 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
     {
         "/menu",
         "/os",
+        "/inbox",
+        "/sources",
         "/chat",
         "/reminders",
         "/memory",
@@ -289,6 +291,10 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
                 InlineKeyboardButton.WithCallbackData("Notes", CommandCallbackPrefix + "/notes")
             ],
             [
+                InlineKeyboardButton.WithCallbackData("Inbox", CommandCallbackPrefix + "/inbox"),
+                InlineKeyboardButton.WithCallbackData("Sources", CommandCallbackPrefix + "/sources")
+            ],
+            [
                 InlineKeyboardButton.WithCallbackData("Settings", CommandCallbackPrefix + "/settings")
             ]
         ]);
@@ -303,7 +309,9 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             || text.StartsWith("Reminders", StringComparison.Ordinal)
             || text.StartsWith("Memory", StringComparison.Ordinal)
             || text.StartsWith("Daily Notes", StringComparison.Ordinal)
-            || text.StartsWith("Settings", StringComparison.Ordinal);
+            || text.StartsWith("Settings", StringComparison.Ordinal)
+            || text.StartsWith("Inbox captures:", StringComparison.Ordinal)
+            || text.StartsWith("Recent source captures:", StringComparison.Ordinal);
     }
 
     private static Guid? ExtractConfirmId(string text)
@@ -331,6 +339,8 @@ public sealed class TelegramBotService : BackgroundService, INotificationSink
             new BotCommand { Command = "memory", Description = "Open memory folder" },
             new BotCommand { Command = "notes", Description = "Open daily notes folder" },
             new BotCommand { Command = "settings", Description = "Show local settings" },
+            new BotCommand { Command = "inbox", Description = "Show unprocessed captures" },
+            new BotCommand { Command = "sources", Description = "Show recent source captures" },
             new BotCommand { Command = "capture", Description = "Save text and extract memory" },
             new BotCommand { Command = "remember", Description = "Save text and extract memory" },
             new BotCommand { Command = "note", Description = "Save a daily note" },

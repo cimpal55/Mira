@@ -187,6 +187,10 @@ updated_utc: {{item.UpdatedAt.ToUniversalTime():O}}
         builder.AppendLine($"- Last dashboard refresh: {FormatDashboardTimestamp(generatedUtc)}");
         builder.AppendLine($"- Most recent memory update: {(orderedItems.Count == 0 ? "none" : FormatDashboardTimestamp(orderedItems[0].UpdatedAt))}");
         builder.AppendLine();
+        builder.AppendLine("## Source inbox");
+        builder.AppendLine();
+        builder.AppendLine("Raw captures are stored under `0-raw/sources` before Mira derives memories, tasks, reminders, or decisions.");
+        builder.AppendLine();
 
         if (items.Count == 0)
         {

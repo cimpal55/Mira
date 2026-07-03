@@ -128,7 +128,7 @@ public sealed class KnowledgeMaintenanceServiceTests
             return Task.FromResult("0-raw/test.md");
         }
 
-        public Task<MemoryItem> UpsertAsync(MemoryUpsert request, CancellationToken cancellationToken = default)
+        public Task<MemoryItem> UpsertAsync(MemoryUpsert request, Guid? sourceCaptureId = null, CancellationToken cancellationToken = default)
         {
             Upserts.Add(request);
             return Task.FromResult(new MemoryItem(Guid.NewGuid(), request.Category, request.Title, request.Content, request.Subject, request.Tags, request.Confidence, request.SourceMessageId, request.SourcePath, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));

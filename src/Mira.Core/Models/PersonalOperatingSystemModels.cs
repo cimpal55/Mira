@@ -26,7 +26,13 @@ public enum SourceKind
     Screenshot,
     Image,
     File,
-    Conversation
+    Conversation,
+    TelegramMessage,
+    TelegramFile,
+    TelegramPhoto,
+    TelegramVoice,
+    ManualNote,
+    AutomationOutput
 }
 
 public enum ModelLane
@@ -42,7 +48,16 @@ public sealed record NightShiftStageDefinition(NightShiftStage Stage, string Nam
 
 public sealed record SourceKindDefinition(SourceKind Kind, string Name, string Purpose);
 
-public sealed record VaultFolderDefinition(string Path, string Purpose, bool PreserveUserEdits);
+public sealed record VaultFolderDefinition(string Path, string Purpose, bool PreserveUserEdits)
+{
+    public string Name { get; init; } = Path;
+
+    public VaultFolderDefinition(string path, string name, string purpose, bool preserveUserEdits)
+        : this(path, purpose, preserveUserEdits)
+    {
+        Name = name;
+    }
+}
 
 public sealed record PlanningLayerDefinition(string Name, string Purpose);
 
@@ -84,6 +99,7 @@ public static class PersonalOperatingSystemMap
     public static IReadOnlyList<VaultFolderDefinition> VaultFolders { get; } =
     [
         new("0-raw/", "Immutable raw captures from Telegram and local ingestion.", true),
+        new("0-raw/sources", "Source inbox", "Immutable raw user inputs before memories, tasks, reminders, and decisions are derived.", true),
         new("0-dashboard/", "Generated local dashboards and Obsidian indexes for live memory visibility.", false),
         new("sources/", "Original external files, links, screenshots, PDFs, and voice notes.", true),
         new("1-desk/", "In-progress triage, drafts, pending reviews, and working notes.", true),
@@ -124,3 +140,32 @@ public static class PersonalOperatingSystemMap
         new("relationship profile update", "Update person profiles from new interactions and preferences.")
     ];
 }
+
+public enum SourceProcessingStatus
+{
+    Unprocessed,
+    Processed,
+    Failed
+}
+
+public sealed record SourceCapture(
+    Guid Id,
+    SourceKind Kind,
+    string Title,
+    string ContentText,
+    string ContentHash,
+    DateTimeOffset CreatedAtUtc,
+    SourceProcessingStatus Status,
+    DateTimeOffset? ProcessedAtUtc,
+    string? ExternalId,
+    string? FilePath,
+    IReadOnlyDictionary<string, string> Metadata);
+
+public sealed record SourceCaptureCreate(
+    SourceKind Kind,
+    string Title,
+    string ContentText,
+    DateTimeOffset CreatedAtUtc,
+    string? ExternalId = null,
+    string? FilePath = null,
+    IReadOnlyDictionary<string, string>? Metadata = null);
