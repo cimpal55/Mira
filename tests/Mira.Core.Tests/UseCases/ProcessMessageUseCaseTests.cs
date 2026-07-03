@@ -163,6 +163,77 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task InboxRetryCommand_saves_classifier_memory_and_marks_target_source_processed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Maxim keyboard note",
+            "my friend Maxim likes mechanical keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider("""
+            {"Intent":"save_memory","Category":"Person","Title":"Maxim keyboards","Content":"Maxim likes mechanical keyboards","Subject":"Maxim","Tags":["friend","keyboard"],"Confidence":0.9}
+            """);
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-retry {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.StartsWith("Saved to Person: Maxim keyboards", reply.Text, StringComparison.Ordinal);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        Assert.Equal(target.Id, memory.LastSourceCaptureId);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 6, 0, 0, TimeSpan.Zero), targetCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
+    public async Task InboxRetryCommand_answer_marks_target_source_processed_without_saving_memory()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Prime question",
+            "What is a prime number?",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider(
+            "{\"Intent\":\"answer\"}",
+            "A prime number is divisible only by 1 and itself.");
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-retry {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("A prime number is divisible only by 1 and itself.", reply.Text);
+        Assert.Empty(memory.Upserts);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Processed, targetCapture.Status);
+    }
+
+    [Fact]
+    public async Task InboxRetryCommand_invalid_classifier_json_leaves_target_source_unprocessed()
+    {
+        var sourceStore = new FakeSourceStore();
+        var target = await sourceStore.SaveSourceCaptureAsync(new SourceCaptureCreate(
+            SourceKind.TelegramMessage,
+            "Ambiguous keyboard note",
+            "Maxim probably maybe split keyboards",
+            new DateTimeOffset(2026, 7, 1, 5, 0, 0, TimeSpan.Zero)), TestContext.Current.CancellationToken);
+        var llm = new FakeLlmProvider("not json");
+        var memory = new FakeMemoryStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message($"/inbox-retry {target.Id}"), TestContext.Current.CancellationToken);
+
+        Assert.Equal("I could not structure this source reliably. It remains in /inbox.", reply.Text);
+        Assert.Empty(memory.Upserts);
+        var targetCapture = sourceStore.Captures.First(capture => capture.Id == target.Id);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, targetCapture.Status);
+        Assert.Null(targetCapture.ProcessedAtUtc);
+    }
+
+    [Fact]
     public async Task RememberCommand_saves_general_memory_when_classifier_fails()
     {
         var llm = new FakeLlmProvider("not json");

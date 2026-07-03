@@ -90,7 +90,7 @@ public sealed class ProcessMessageUseCase(
                 return await ReplyAsync(message, answer, cancellationToken).ConfigureAwait(false);
             }
 
-            var handlingResult = await HandleActionAsync(message, text, sourceCapture.Id, classification.Action, cancellationToken).ConfigureAwait(false);
+            var handlingResult = await HandleActionAsync(message, text, message.MessageId, sourceCapture.Id, classification.Action, cancellationToken).ConfigureAwait(false);
             if (handlingResult.SourceProcessed)
             {
                 await sourceStore.MarkSourceCaptureProcessedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -130,6 +130,11 @@ public sealed class ProcessMessageUseCase(
         if (TryGetCommandArgument(text, "/inbox-skip", out var inboxSkipText))
         {
             return await ReplyAsync(message, await SkipInboxSourceAsync(inboxSkipText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+        }
+
+        if (TryGetCommandArgument(text, "/inbox-retry", out var inboxRetryText))
+        {
+            return await ReplyAsync(message, await RetryInboxSourceAsync(message, inboxRetryText, cancellationToken).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
         }
 
         if (IsCommand(text, "/inbox"))
@@ -277,12 +282,12 @@ public sealed class ProcessMessageUseCase(
         return null;
     }
 
-    private async Task<SourceHandlingResult> HandleActionAsync(IncomingMessage message, string text, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
+    private async Task<SourceHandlingResult> HandleActionAsync(IncomingMessage message, string text, long sourceMessageId, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
     {
         var receivedAtUtc = ToUtc(message.ReceivedAt);
         return NormalizeIntent(action.Intent) switch
         {
-            "save_memory" => await SaveMemoryIntentAsync(message.MessageId, sourceCaptureId, text, action, cancellationToken).ConfigureAwait(false),
+            "save_memory" => await SaveMemoryIntentAsync(sourceMessageId, sourceCaptureId, text, action, cancellationToken).ConfigureAwait(false),
             "answer" or "chat" => new SourceHandlingResult(
                 await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: false, cancellationToken).ConfigureAwait(false),
                 SourceProcessed: true),
@@ -911,6 +916,7 @@ Commands:
 - /inbox - recent unprocessed captures
 - /inbox-save <source-guid> <category> | <title> | <content> — save an inbox source
 - /inbox-skip <source-guid> — mark an inbox source processed
+- /inbox-retry <source-guid> — run classifier again for an inbox source
 - /sources - recent source captures
 - /search <text> — search saved memories
 - /people — list saved people
@@ -1058,6 +1064,48 @@ Reusable skills:
         return $"Marked source processed: {source.Title}";
     }
 
+    private async Task<string> RetryInboxSourceAsync(IncomingMessage message, string argument, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(argument.Trim(), out var sourceCaptureId))
+        {
+            return "Usage: /inbox-retry <source-guid>";
+        }
+
+        var source = await sourceStore.GetSourceCaptureAsync(sourceCaptureId, cancellationToken).ConfigureAwait(false);
+        if (source is null)
+        {
+            return "Source capture not found.";
+        }
+
+        if (source.Status is not SourceProcessingStatus.Unprocessed)
+        {
+            return $"Source capture is already {source.Status}.";
+        }
+
+        try
+        {
+            var classification = await ClassifyAsync(message.ChatId, source.CreatedAtUtc, source.ContentText, forceSaveMemory: false, cancellationToken).ConfigureAwait(false);
+            if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
+            {
+                return "I could not structure this source reliably. It remains in /inbox.";
+            }
+
+            var sourceMessageId = ParseTelegramSourceMessageId(source) ?? message.MessageId;
+            var handlingResult = await HandleActionAsync(message, source.ContentText, sourceMessageId, source.Id, classification.Action, cancellationToken).ConfigureAwait(false);
+            if (handlingResult.SourceProcessed)
+            {
+                await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+            }
+
+            return handlingResult.ReplyText;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await sourceStore.MarkSourceCaptureFailedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
+            throw;
+        }
+    }
+
     private static bool TryParseInboxSaveArgument(
         string argument,
         out Guid sourceCaptureId,
@@ -1114,6 +1162,7 @@ Reusable skills:
         return "Inbox captures:\n"
             + "Use /inbox-save <source-guid> <category> | <title> | <content> to save one.\n"
             + "Use /inbox-skip <source-guid> to dismiss one.\n"
+            + "Use /inbox-retry <source-guid> to run classification again.\n"
             + string.Join("\n", visibleCaptures.Select(FormatSourceCaptureRow));
     }
 
@@ -1273,6 +1322,7 @@ Mira local assistant commands:
 /inbox - recent unprocessed captures
 /inbox-save <source-guid> <category> | <title> | <content> — save an inbox source
 /inbox-skip <source-guid> — mark an inbox source processed
+/inbox-retry <source-guid> — run classifier again for an inbox source
 /sources - recent source captures
 /capture <text> — save raw text and extract memory
 /remember <text> — save raw text and extract memory
