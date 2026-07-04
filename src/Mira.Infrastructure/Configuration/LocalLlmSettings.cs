@@ -1,7 +1,6 @@
 namespace Mira.Infrastructure.Configuration;
 
 using System.ComponentModel.DataAnnotations;
-
 public sealed class LocalLlmSettings
 {
     public const string SectionName = "LocalLlm";

@@ -1,7 +1,6 @@
 namespace Mira.Infrastructure.Configuration;
 
 using System.ComponentModel.DataAnnotations;
-
 public sealed class TelegramSettings
 {
     public const string SectionName = "Telegram";
