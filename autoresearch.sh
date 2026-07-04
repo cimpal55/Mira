@@ -23,15 +23,26 @@ filter="FullyQualifiedName~ProcessMessageUseCaseTests"
 # not compiler or restore overhead. --no-restore keeps the harness offline.
 "${dotnet_cmd[@]}" build "$project" --configuration "$configuration" --no-restore >/dev/null
 
-start_ns=$(date +%s%N)
+output_file="$(mktemp)"
+trap 'rm -f "$output_file"' EXIT
+
 "${dotnet_cmd[@]}" test "$project" \
   --configuration "$configuration" \
   --no-build \
   --filter "$filter" \
-  --logger "console;verbosity=minimal"
-end_ns=$(date +%s%N)
+  --logger "console;verbosity=minimal" | tee "$output_file"
 
-elapsed_ms=$(((end_ns - start_ns) / 1000000))
+elapsed_ms=""
+while IFS= read -r line; do
+  if [[ "$line" =~ Duration:[[:space:]]+([0-9]+)[[:space:]]+ms ]]; then
+    elapsed_ms="${BASH_REMATCH[1]}"
+  fi
+done < "$output_file"
+
+if [[ -z "$elapsed_ms" ]]; then
+  echo "Could not parse test execution duration from dotnet test output." >&2
+  exit 1
+fi
 
 echo "METRIC process_message_usecase_ms=${elapsed_ms}"
 echo "METRIC process_message_usecase_tests=47"
