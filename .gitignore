@@ -60,3 +60,7 @@ appsettings.*.json
 ## OS
 .DS_Store
 Thumbs.db
+
+.omp/
+/CLAUDE.md
+*.html
