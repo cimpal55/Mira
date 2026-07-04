@@ -314,6 +314,70 @@ public sealed class ProcessMessageUseCaseTests
     }
 
     [Fact]
+    public async Task ClassifierPrompt_documents_multi_action_shape()
+    {
+        var llm = new FakeLlmProvider("{\"Intent\":\"answer\"}", "Done.");
+        var useCase = CreateUseCase(llm);
+
+        await useCase.HandleAsync(Message("Nika likes jazz and remind me at 10 to stretch"), TestContext.Current.CancellationToken);
+
+        var prompt = llm.Requests[0].Messages[0].Content;
+        Assert.Contains("multiple independent actionable items", prompt, StringComparison.Ordinal);
+        Assert.Contains("\"Actions\"", prompt, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task MultiActionMessage_saves_memory_and_creates_reminder()
+    {
+        var llm = new FakeLlmProvider("""
+            {"Actions":[
+              {"Intent":"save_memory","Category":"Person","Title":"Nika likes jazz","Content":"Nika likes jazz","Subject":"Nika","Tags":["jazz"],"Confidence":0.9},
+              {"Intent":"create_reminder","Title":"Stretch","DueLocal":"2026-07-01T10:00:00+00:00","Repeat":"None"}
+            ]}
+            """);
+        var memory = new FakeMemoryStore();
+        var reminders = new FakeReminderStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore, reminderStore: reminders);
+
+        var reply = await useCase.HandleAsync(Message("Nika likes jazz and remind me at 10 to stretch"), TestContext.Current.CancellationToken);
+
+        Assert.Contains("Saved to Person: Nika likes jazz", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("Reminder saved: Stretch", reply.Text, StringComparison.Ordinal);
+        var upsert = Assert.Single(memory.Upserts);
+        Assert.Equal(MemoryCategory.Person, upsert.Category);
+        var reminder = Assert.Single(reminders.Created);
+        Assert.Equal("Stretch", reminder.Title);
+        Assert.Equal(new DateTimeOffset(2026, 7, 1, 10, 0, 0, TimeSpan.Zero), reminder.DueAtUtc);
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Equal(SourceProcessingStatus.Processed, sourceCapture.Status);
+    }
+
+    [Fact]
+    public async Task MultiActionMessage_with_clarification_keeps_source_unprocessed_and_returns_buttons()
+    {
+        var llm = new FakeLlmProvider("""
+            {"Actions":[
+              {"Intent":"save_memory","Category":"Person","Title":"Nika likes jazz","Content":"Nika likes jazz","Subject":"Nika","Tags":["jazz"],"Confidence":0.9},
+              {"Intent":"clarify","Question":"When should I remind you?"}
+            ]}
+            """);
+        var memory = new FakeMemoryStore();
+        var sourceStore = new FakeSourceStore();
+        var useCase = CreateUseCase(llm, memory, sourceStore);
+
+        var reply = await useCase.HandleAsync(Message("Nika likes jazz and remind me to stretch"), TestContext.Current.CancellationToken);
+
+        var sourceCapture = Assert.Single(sourceStore.Captures);
+        Assert.Contains("Saved to Person: Nika likes jazz", reply.Text, StringComparison.Ordinal);
+        Assert.Contains("When should I remind you?", reply.Text, StringComparison.Ordinal);
+        Assert.Single(memory.Upserts);
+        Assert.Equal(SourceProcessingStatus.Unprocessed, sourceCapture.Status);
+        Assert.Contains(reply.Actions, action => action.Command == $"/inbox-remember {sourceCapture.Id}");
+        Assert.Contains(reply.Actions, action => action.Command == $"/inbox-skip {sourceCapture.Id}");
+    }
+
+    [Fact]
     public async Task ClarifyIntent_returns_source_action_buttons_for_current_capture()
     {
         var sourceStore = new FakeSourceStore();

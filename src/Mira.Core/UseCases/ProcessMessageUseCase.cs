@@ -86,7 +86,9 @@ public sealed class ProcessMessageUseCase(
             }
 
             var classification = await ClassifyAsync(message.ChatId, receivedAtUtc, text, forceSaveMemory: false, cancellationToken, excludedSourceCaptureId: sourceCapture.Id).ConfigureAwait(false);
-            if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
+            if (!classification.IsStructured
+                || classification.Actions.Count == 0
+                || classification.Actions.Any(action => !IsKnownIntent(action.Intent)))
             {
                 var answer = await AnswerWithContextAsync(message.ChatId, receivedAtUtc, text, appendStructuringFailure: true, cancellationToken).ConfigureAwait(false);
                 return await ReplyAsync(
@@ -96,7 +98,7 @@ public sealed class ProcessMessageUseCase(
                     BuildClarificationActions(sourceCapture.Id)).ConfigureAwait(false);
             }
 
-            var handlingResult = await HandleActionAsync(message, text, message.MessageId, sourceCapture.Id, classification.Action, cancellationToken).ConfigureAwait(false);
+            var handlingResult = await HandleActionsAsync(message, text, message.MessageId, sourceCapture.Id, classification.Actions, cancellationToken).ConfigureAwait(false);
             if (handlingResult.SourceProcessed)
             {
                 await sourceStore.MarkSourceCaptureProcessedAsync(sourceCapture.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -167,7 +169,7 @@ public sealed class ProcessMessageUseCase(
 
             var sourcePath = await memoryStore.SaveRawCaptureAsync(captureText, clock.UtcNow, cancellationToken).ConfigureAwait(false);
             var classification = await ClassifyAsync(message.ChatId, ToUtc(message.ReceivedAt), captureText, forceSaveMemory: true, cancellationToken, includeInboxContext: false).ConfigureAwait(false);
-            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, classification.Action, cancellationToken).ConfigureAwait(false);
+            var saved = await SaveCapturedMemoryAsync(captureText, sourcePath, message.MessageId, sourceCaptureId, SelectMemoryAction(classification), cancellationToken).ConfigureAwait(false);
             return await ReplyAsync(message, $"Saved: {saved.Title}", cancellationToken).ConfigureAwait(false);
         }
 
@@ -293,6 +295,42 @@ public sealed class ProcessMessageUseCase(
         return null;
     }
 
+    private async Task<SourceHandlingResult> HandleActionsAsync(
+        IncomingMessage message,
+        string text,
+        long sourceMessageId,
+        Guid sourceCaptureId,
+        IReadOnlyList<AssistantAction> actions,
+        CancellationToken cancellationToken)
+    {
+        if (actions.Count == 1)
+        {
+            return await HandleActionAsync(message, text, sourceMessageId, sourceCaptureId, actions[0], cancellationToken).ConfigureAwait(false);
+        }
+
+        var replies = new List<string>(actions.Count);
+        var sourceProcessed = true;
+        IReadOnlyList<AssistantReplyAction>? suggestedActions = null;
+
+        foreach (var action in actions)
+        {
+            var result = await HandleActionAsync(message, text, sourceMessageId, sourceCaptureId, action, cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(result.ReplyText))
+            {
+                replies.Add(result.ReplyText);
+            }
+
+            sourceProcessed &= result.SourceProcessed;
+            if ((suggestedActions is null || suggestedActions.Count == 0) && result.Actions is { Count: > 0 })
+            {
+                suggestedActions = result.Actions;
+            }
+        }
+
+        var replyText = replies.Count == 0 ? "Done." : string.Join("\n\n", replies);
+        return new SourceHandlingResult(replyText, sourceProcessed, suggestedActions);
+    }
+
     private async Task<SourceHandlingResult> HandleActionAsync(IncomingMessage message, string text, long sourceMessageId, Guid sourceCaptureId, AssistantAction action, CancellationToken cancellationToken)
     {
         var receivedAtUtc = ToUtc(message.ReceivedAt);
@@ -338,16 +376,48 @@ public sealed class ProcessMessageUseCase(
         try
         {
             var response = await llmProvider.CompleteAsync(request, cancellationToken).ConfigureAwait(false);
-            var action = JsonSerializer.Deserialize<AssistantAction>(response.Content, JsonOptions);
-            return action is null || string.IsNullOrWhiteSpace(action.Intent)
-                ? new ClassificationResult(null, IsStructured: false)
-                : new ClassificationResult(action, IsStructured: true);
+            var actions = ParseClassificationActions(response.Content);
+            return actions.Count == 0
+                ? new ClassificationResult([], IsStructured: false)
+                : new ClassificationResult(actions, IsStructured: true);
         }
         catch (JsonException)
         {
-            return new ClassificationResult(null, IsStructured: false);
+            return new ClassificationResult([], IsStructured: false);
         }
     }
+
+    private static IReadOnlyList<AssistantAction> ParseClassificationActions(string content)
+    {
+        using var document = JsonDocument.Parse(content);
+        if (document.RootElement.ValueKind is not JsonValueKind.Object)
+        {
+            return [];
+        }
+
+        if (document.RootElement.TryGetProperty("Actions", out var actionsElement))
+        {
+            var actions = actionsElement.Deserialize<List<AssistantAction>>(JsonOptions);
+            return CleanClassificationActions(actions);
+        }
+
+        var action = document.RootElement.Deserialize<AssistantAction>(JsonOptions);
+        return action is null || string.IsNullOrWhiteSpace(action.Intent) ? [] : [action];
+    }
+
+    private static IReadOnlyList<AssistantAction> CleanClassificationActions(List<AssistantAction>? actions)
+    {
+        return actions is null
+            ? []
+            : actions.Where(action => !string.IsNullOrWhiteSpace(action.Intent)).ToArray();
+    }
+
+    private static AssistantAction? SelectMemoryAction(ClassificationResult classification)
+    {
+        return classification.Actions.FirstOrDefault(action => NormalizeIntent(action.Intent) == "save_memory")
+            ?? classification.Actions.FirstOrDefault();
+    }
+
 
     private string BuildClassificationPrompt(bool forceSaveMemory, string recentDialogue, string inboxContext)
     {
@@ -358,11 +428,13 @@ public sealed class ProcessMessageUseCase(
             : "Choose the safest intent. If the message is ambiguous, use recent dialogue to resolve follow-up references; otherwise use clarify.";
 
         return $$"""
-You classify one private local-assistant message into exactly one action.
+You classify one private local-assistant message into one or more actions.
 Current local time: {{localNow:O}}
 Valid MemoryCategory names: {{categories}}
 Intent must be exactly one of: save_memory, answer, create_reminder, list_reminders, complete_reminder, run_automation, daily_brief, weekly_review, health_summary, clarify, chat, inbox_save, inbox_skip.
 {{forceInstruction}}
+If one message contains multiple independent actionable items, return {"Actions":[...]} with one action object per item in the order it should run.
+For simple single-action messages, returning one action object with the same properties is also accepted.
 Use save_memory for durable facts about people/friends/health/medical/job/hobby/gear/thought/decision/daily notes.
 When the user sends ordinary declarative personal text, decide whether it should become saved memory without requiring /capture or /remember.
 For save_memory, choose the most specific MemoryCategory and produce a concise title, subject when obvious, useful tags, and content that preserves the durable fact.
@@ -381,7 +453,8 @@ Recent unprocessed inbox captures available for references like "that", "the las
 Recent dialogue before current message:
 {{recentDialogue}}
 Return JSON only. Do not include markdown.
-JSON properties: Intent, SourceCaptureId, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question.
+Single-action JSON properties: Intent, SourceCaptureId, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question.
+Multi-action JSON shape: {"Actions":[{Intent, SourceCaptureId, Category, Title, Subject, Content, Tags, Confidence, DueLocal, Repeat, AutomationName, AutomationArguments, Question}, ...]}.
 """;
     }
 
@@ -1199,13 +1272,15 @@ Reusable skills:
         try
         {
             var classification = await ClassifyAsync(message.ChatId, source.CreatedAtUtc, source.ContentText, forceSaveMemory: false, cancellationToken, includeInboxContext: false).ConfigureAwait(false);
-            if (!classification.IsStructured || classification.Action is null || !IsKnownIntent(classification.Action.Intent))
+            if (!classification.IsStructured
+                || classification.Actions.Count == 0
+                || classification.Actions.Any(action => !IsKnownIntent(action.Intent)))
             {
                 return "I could not structure this source reliably. It remains in /inbox.";
             }
 
             var sourceMessageId = ParseTelegramSourceMessageId(source) ?? message.MessageId;
-            var handlingResult = await HandleActionAsync(message, source.ContentText, sourceMessageId, source.Id, classification.Action, cancellationToken).ConfigureAwait(false);
+            var handlingResult = await HandleActionsAsync(message, source.ContentText, sourceMessageId, source.Id, classification.Actions, cancellationToken).ConfigureAwait(false);
             if (handlingResult.SourceProcessed)
             {
                 await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -1250,7 +1325,7 @@ Reusable skills:
             sourcePath,
             ParseTelegramSourceMessageId(source) ?? message.MessageId,
             source.Id,
-            classification.Action,
+            SelectMemoryAction(classification),
             cancellationToken).ConfigureAwait(false);
 
         await sourceStore.MarkSourceCaptureProcessedAsync(source.Id, clock.UtcNow, cancellationToken).ConfigureAwait(false);
@@ -1493,7 +1568,7 @@ Mira local assistant commands:
 """;
     }
 
-    private sealed record ClassificationResult(AssistantAction? Action, bool IsStructured);
+    private sealed record ClassificationResult(IReadOnlyList<AssistantAction> Actions, bool IsStructured);
 
     private sealed record SourceHandlingResult(string ReplyText, bool SourceProcessed, IReadOnlyList<AssistantReplyAction>? Actions = null);
 
