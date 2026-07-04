@@ -41,24 +41,30 @@ public sealed class LocalLlmProvider(IHttpClientFactory httpClientFactory, IOpti
                     $"Local LLM backend at {endpoint} returned HTTP {(int)response.StatusCode} ({response.StatusCode}).");
             }
 
-            ChatCompletionResponse? parsed;
-            try
-            {
-                parsed = await response.Content.ReadFromJsonAsync<ChatCompletionResponse>(JsonOptions, cancellationToken).ConfigureAwait(false);
-            }
-            catch (JsonException ex)
-            {
-                throw new InvalidOperationException("Local LLM returned an invalid chat completion response.", ex);
-            }
-
-            var content = parsed?.Choices?.FirstOrDefault()?.Message?.Content;
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                throw new InvalidOperationException("Local LLM returned an empty response.");
-            }
-
+            var content = await ReadResponseContentAsync(response, cancellationToken).ConfigureAwait(false);
             return new LlmResponse(content);
         }
+    }
+
+    private static async Task<string> ReadResponseContentAsync(HttpResponseMessage response, CancellationToken cancellationToken)
+    {
+        ChatCompletionResponse? parsed;
+        try
+        {
+            parsed = await response.Content.ReadFromJsonAsync<ChatCompletionResponse>(JsonOptions, cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException("Local LLM returned an invalid chat completion response.", ex);
+        }
+
+        var content = parsed?.Choices?.FirstOrDefault()?.Message?.Content;
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            throw new InvalidOperationException("Local LLM returned an empty response.");
+        }
+
+        return content;
     }
 
     private async Task<HttpResponseMessage> SendAsync(Uri endpoint, ChatCompletionRequest payload, CancellationToken cancellationToken)
