@@ -1498,7 +1498,7 @@ Commands:
     private static bool IsCommand(string text, string command)
     {
         return text.Equals(command, StringComparison.OrdinalIgnoreCase)
-            || text.StartsWith(command + " ", StringComparison.OrdinalIgnoreCase);
+            || HasCommandArgumentPrefix(text, command);
     }
 
     private static bool TryGetCommandArgument(string text, string command, out string argument)
@@ -1509,14 +1509,21 @@ Commands:
             return true;
         }
 
-        if (text.StartsWith(command + " ", StringComparison.OrdinalIgnoreCase))
+        if (HasCommandArgumentPrefix(text, command))
         {
-            argument = text[command.Length..].Trim();
+            argument = text[(command.Length + 1)..].Trim();
             return true;
         }
 
         argument = string.Empty;
         return false;
+    }
+
+    private static bool HasCommandArgumentPrefix(string text, string command)
+    {
+        return text.Length > command.Length
+            && text[command.Length] == ' '
+            && text.AsSpan(0, command.Length).Equals(command, StringComparison.OrdinalIgnoreCase);
     }
 
     private static Guid? ExtractGuid(string text)
