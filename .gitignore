@@ -64,3 +64,4 @@ Thumbs.db
 .omp/
 /CLAUDE.md
 *.html
+/src/Mira.App/mira.db
