@@ -17,20 +17,21 @@ public sealed class LocalLlmProvider(IHttpClientFactory httpClientFactory, IOpti
     };
 
     private readonly LocalLlmSettings _settings = options.Value;
+    private readonly Uri _endpoint = BuildEndpoint(options.Value.BaseUrl);
+    private readonly TimeSpan _timeout = TimeSpan.FromSeconds(options.Value.TimeoutSeconds);
 
     public async Task<LlmResponse> CompleteAsync(LlmRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var endpoint = BuildEndpoint(_settings.BaseUrl);
         var payload = BuildRequest(request, includeJsonResponseFormat: request.RequireJson);
-        var response = await SendAsync(endpoint, payload, cancellationToken).ConfigureAwait(false);
+        var response = await SendAsync(payload, cancellationToken).ConfigureAwait(false);
 
         if (response.StatusCode == HttpStatusCode.BadRequest && request.RequireJson)
         {
             response.Dispose();
             payload = BuildRequest(request, includeJsonResponseFormat: false);
-            response = await SendAsync(endpoint, payload, cancellationToken).ConfigureAwait(false);
+            response = await SendAsync(payload, cancellationToken).ConfigureAwait(false);
         }
 
         using (response)
@@ -38,7 +39,7 @@ public sealed class LocalLlmProvider(IHttpClientFactory httpClientFactory, IOpti
             if (!response.IsSuccessStatusCode)
             {
                 throw new InvalidOperationException(
-                    $"Local LLM backend at {endpoint} returned HTTP {(int)response.StatusCode} ({response.StatusCode}).");
+                    $"Local LLM backend at {_endpoint} returned HTTP {(int)response.StatusCode} ({response.StatusCode}).");
             }
 
             var content = await ReadResponseContentAsync(response, cancellationToken).ConfigureAwait(false);
@@ -67,12 +68,12 @@ public sealed class LocalLlmProvider(IHttpClientFactory httpClientFactory, IOpti
         return content;
     }
 
-    private async Task<HttpResponseMessage> SendAsync(Uri endpoint, ChatCompletionRequest payload, CancellationToken cancellationToken)
+    private async Task<HttpResponseMessage> SendAsync(ChatCompletionRequest payload, CancellationToken cancellationToken)
     {
         var client = httpClientFactory.CreateClient(nameof(LocalLlmProvider));
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(_settings.TimeoutSeconds));
-        return await client.PostAsJsonAsync(endpoint, payload, JsonOptions, timeoutCts.Token).ConfigureAwait(false);
+        timeoutCts.CancelAfter(_timeout);
+        return await client.PostAsJsonAsync(_endpoint, payload, JsonOptions, timeoutCts.Token).ConfigureAwait(false);
     }
 
     private ChatCompletionRequest BuildRequest(LlmRequest request, bool includeJsonResponseFormat)
